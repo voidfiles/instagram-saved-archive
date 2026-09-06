@@ -63,16 +63,44 @@ class SnapshotStore:
         """Persist canonical metadata by replacing each fsynced document atomically."""
         self._ensure_root()
         validate_manifest(manifest)
-        manifest_text = _canonical_json(dump_manifest(manifest))
-        state_text = _canonical_json(dump_sync_state(state))
-        _atomic_write(self.root / MANIFEST_FILENAME, manifest_text)
-        _atomic_write(self.root / SYNC_STATE_FILENAME, state_text)
+        manifest_path = self.root / MANIFEST_FILENAME
+        state_path = self.root / SYNC_STATE_FILENAME
+        new_manifest: Path | None = None
+        new_state: Path | None = None
+        old_manifest: Path | None = None
+        old_state: Path | None = None
+        replacement_started = False
+        try:
+            new_manifest = _write_temporary(manifest_path, _canonical_json(dump_manifest(manifest)))
+            new_state = _write_temporary(state_path, _canonical_json(dump_sync_state(state)))
+            old_manifest = _backup_temporary(manifest_path)
+            old_state = _backup_temporary(state_path)
+            replacement_started = True
+            os.replace(new_manifest, manifest_path)
+            os.replace(new_state, state_path)
+            _fsync_directory(self.root)
+        except OSError:
+            if replacement_started:
+                _restore_document(manifest_path, old_manifest)
+                _restore_document(state_path, old_state)
+                _fsync_directory(self.root)
+            raise
+        finally:
+            if new_manifest is not None:
+                new_manifest.unlink(missing_ok=True)
+            if new_state is not None:
+                new_state.unlink(missing_ok=True)
+            if old_manifest is not None:
+                old_manifest.unlink(missing_ok=True)
+            if old_state is not None:
+                old_state.unlink(missing_ok=True)
 
     def validate_files(self, manifest: Manifest) -> None:
         """Validate every referenced asset and reject unexpected media files or symlinks."""
         validate_manifest(manifest)
         self._ensure_root()
         root = self.root.resolve(strict=True)
+        snapshot_files = tuple(_walk_files(root))
         expected_paths: set[Path] = set()
         for asset_path, byte_size, sha256 in _assets(manifest):
             path = root / asset_path
@@ -99,7 +127,7 @@ class SnapshotStore:
             return
         if media_root.is_symlink() or not media_root.is_dir():
             raise ValueError("media directory must be a real directory")
-        for path in _walk_files(root):
+        for path in snapshot_files:
             relative = path.relative_to(root)
             if relative.parts[0] == MEDIA_DIRECTORY and relative not in expected_paths:
                 raise ValueError(f"unreferenced media file: {relative.as_posix()}")
@@ -137,21 +165,36 @@ def _canonical_json(data: dict[str, object]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
-def _atomic_write(destination: Path, content: str) -> None:
+def _write_temporary(destination: Path, content: str | bytes) -> Path:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", dir=destination.parent
     )
     temporary_path = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
-            temporary.write(content)
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        with os.fdopen(descriptor, "wb") as temporary:
+            temporary.write(data)
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.replace(temporary_path, destination)
-        _fsync_directory(destination.parent)
+        return temporary_path
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def _backup_temporary(destination: Path) -> Path | None:
+    if not destination.exists():
+        return None
+    if destination.is_symlink() or not destination.is_file():
+        raise ValueError(f"snapshot document must be a real file: {destination.name}")
+    return _write_temporary(destination, destination.read_bytes())
+
+
+def _restore_document(destination: Path, backup: Path | None) -> None:
+    if backup is None:
+        destination.unlink(missing_ok=True)
+    else:
+        os.replace(backup, destination)
 
 
 def _fsync_directory(directory: Path) -> None:

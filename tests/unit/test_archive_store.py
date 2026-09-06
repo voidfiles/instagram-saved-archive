@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -137,6 +139,40 @@ def test_repeated_atomic_writes_are_always_loadable_as_old_or_new_records(tmp_pa
         assert store.load() == (manifest, state)
 
 
+def test_write_atomic_restores_the_previous_pair_when_second_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Break caught: a state-replacement failure leaves a new manifest with an old sync state."""
+    store = SnapshotStore(tmp_path / "snapshot")
+    store.initialize()
+    old_manifest, old_state = store.load()
+    old_manifest_bytes = (store.root / "manifest.json").read_bytes()
+    old_state_bytes = (store.root / "sync-state.json").read_bytes()
+    files = {
+        "media/IMAGE0001/00.webp": b"primary bytes",
+        "media/IMAGE0001/00-thumb.webp": b"preview bytes",
+    }
+    _write_files(store.root, files)
+    replace_calls = 0
+    original_replace = os.replace
+
+    def fail_second_replace(source: str | Path, destination: str | Path) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError("injected second final replacement failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr("sync.archive.store.os.replace", fail_second_replace)
+
+    with pytest.raises(OSError, match="injected second final replacement failure"):
+        store.write_atomic(_manifest_for_files(files), replace(_state(), reconciliation_cursor=1))
+
+    assert store.load() == (old_manifest, old_state)
+    assert (store.root / "manifest.json").read_bytes() == old_manifest_bytes
+    assert (store.root / "sync-state.json").read_bytes() == old_state_bytes
+
+
 def test_validate_files_accepts_recorded_files_and_reports_snapshot_size(tmp_path: Path) -> None:
     """Break caught: valid files fail validation or snapshot size ignores persisted files."""
     store = SnapshotStore(tmp_path / "snapshot")
@@ -205,3 +241,20 @@ def test_validate_files_rejects_a_symlink_anywhere_under_media(tmp_path: Path) -
 
     with pytest.raises(ValueError):
         store.validate_files(manifest)
+
+
+def test_validate_files_rejects_top_level_symlink_for_an_empty_snapshot(tmp_path: Path) -> None:
+    """Break caught: an empty snapshot skips whole-tree symlink validation when media is absent."""
+    store = SnapshotStore(tmp_path / "snapshot")
+    store.initialize()
+    (store.root / "media").rmdir()
+    target = tmp_path / "target.txt"
+    target.write_text("outside snapshot", encoding="utf-8")
+    link = store.root / "top-level-link"
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symlinks are unavailable: {error}")
+
+    with pytest.raises(ValueError):
+        store.validate_files(store.load()[0])
