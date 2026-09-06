@@ -138,3 +138,20 @@ def test_process_image_refuses_a_generated_file_over_95_mib(
     assert MAX_GENERATED_FILE_BYTES == 95 * 1024 * 1024
     assert not primary.exists()
     assert not preview.exists()
+
+
+def test_process_image_path_collision_preserves_caller_owned_files(tmp_path: Path) -> None:
+    """Break caught: preflight rejection deletes a colliding source or existing output."""
+    source = tmp_path / "00.webp"
+    with Image.new("RGB", (24, 16), "navy") as image:
+        image.save(source, format="WEBP")
+    preview = tmp_path / "00-thumb.webp"
+    preview.write_bytes(b"caller-owned-preview")
+    source_before = source.read_bytes()
+    preview_before = preview.read_bytes()
+
+    with pytest.raises(ValidationError):
+        process_image(source, source, preview)
+
+    assert source.read_bytes() == source_before
+    assert preview.read_bytes() == preview_before

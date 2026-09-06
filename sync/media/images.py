@@ -38,9 +38,9 @@ def fit_image(width: int, height: int, longest_edge: int) -> Dimensions:
 def process_image(source: Path, primary: Path, preview: Path) -> MediaRecord:
     """Create and validate primary and thumbnail WebP renditions for one still image."""
     outputs = (primary, preview)
+    _validate_output_ownership(source, outputs)
+    created: set[Path] = set()
     try:
-        if source in outputs or primary == preview:
-            raise ValidationError("image input and output paths must be distinct")
         with Image.open(source) as opened:
             opened.load()
             if (
@@ -53,8 +53,14 @@ def process_image(source: Path, primary: Path, preview: Path) -> MediaRecord:
         try:
             primary_dimensions = fit_image(*converted.size, 1600)
             preview_dimensions = fit_image(*converted.size, 640)
-            _save_webp(converted, primary, primary_dimensions)
-            _save_webp(converted, preview, preview_dimensions)
+            try:
+                _save_webp(converted, primary, primary_dimensions)
+            finally:
+                _claim_created(primary, created)
+            try:
+                _save_webp(converted, preview, preview_dimensions)
+            finally:
+                _claim_created(preview, created)
         finally:
             converted.close()
         primary_asset = _asset_record(primary, "image/webp", primary_dimensions)
@@ -66,13 +72,13 @@ def process_image(source: Path, primary: Path, preview: Path) -> MediaRecord:
             preview=preview_asset,
         )
     except (ValidationError, SizeError):
-        _remove_outputs(outputs)
+        _remove_outputs(created)
         raise
     except (OSError, UnidentifiedImageError, ValueError):
-        _remove_outputs(outputs)
+        _remove_outputs(created)
         raise ValidationError("image processing failed") from None
     except BaseException:
-        _remove_outputs(outputs)
+        _remove_outputs(created)
         raise
 
 
@@ -163,6 +169,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _remove_outputs(paths: tuple[Path, ...]) -> None:
+def _validate_output_ownership(source: Path, outputs: tuple[Path, ...]) -> None:
+    resolved = (source.resolve(strict=False), *(path.resolve(strict=False) for path in outputs))
+    if len(set(resolved)) != len(resolved):
+        raise ValidationError("media input and output paths must be distinct")
+    for path in outputs:
+        if path.exists():
+            raise FileExistsError(path)
+
+
+def _claim_created(path: Path, created: set[Path]) -> None:
+    if path.exists():
+        created.add(path)
+
+
+def _remove_outputs(paths: set[Path]) -> None:
     for path in paths:
         path.unlink(missing_ok=True)

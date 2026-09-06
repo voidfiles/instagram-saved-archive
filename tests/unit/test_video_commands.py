@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from sync.instagram.errors import ValidationError
+from sync.media import videos
 from sync.media.videos import VideoProbe, build_ffmpeg_command, fit_video
 
 
@@ -37,6 +38,27 @@ def test_fit_video_rejects_geometry_that_cannot_produce_even_pixels(
         fit_video(width, height)
 
 
+@pytest.mark.parametrize(
+    ("coded", "sample_aspect_ratio", "rotation", "expected"),
+    [
+        ((640, 360), "1:1", 90, (360, 640)),
+        ((720, 576), "16:15", 0, (768, 576)),
+        ((720, 576), "16:15", 270, (576, 768)),
+    ],
+)
+def test_normalize_video_geometry_uses_rotation_and_sample_aspect_ratio(
+    coded: tuple[int, int],
+    sample_aspect_ratio: str,
+    rotation: int,
+    expected: tuple[int, int],
+) -> None:
+    """Break caught: fitting uses coded pixels instead of square-pixel display geometry."""
+    assert (
+        videos.normalize_video_geometry(*coded, sample_aspect_ratio, rotation).as_tuple()
+        == expected
+    )
+
+
 @pytest.mark.parametrize("has_audio", [False, True])
 def test_ffmpeg_command_encodes_the_required_video_profile(tmp_path: Path, has_audio: bool) -> None:
     """Break caught: the transcoder loses the web profile, quality, or progressive-playback flags."""
@@ -46,22 +68,24 @@ def test_ffmpeg_command_encodes_the_required_video_profile(tmp_path: Path, has_a
 
     command = build_ffmpeg_command(probe, source, output)
 
-    assert command[:7] == [
+    assert command[:5] == [
         "ffmpeg",
         "-nostdin",
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
-        "-i",
     ]
-    assert command[7] == str(source)
-    assert _option(command, "-vf") == "scale=1280:720:flags=lanczos"
+    assert _option(command, "-i") == str(source)
+    assert "-xerror" in command
+    assert _option(command, "-err_detect") == "explode"
+    assert "-autorotate" in command
+    assert _option(command, "-vf") == "scale=1280:720:flags=lanczos,setsar=1"
     assert _option(command, "-c:v") == "libx264"
     assert _option(command, "-preset") == "medium"
     assert _option(command, "-crf") == "24"
     assert _option(command, "-pix_fmt") == "yuv420p"
     assert _option(command, "-movflags") == "+faststart"
+    assert _option(command, "-metadata:s:v:0") == "rotate=0"
     assert command[-1] == str(output)
     if has_audio:
         assert _option(command, "-c:a") == "aac"

@@ -88,6 +88,99 @@ def test_probe_video_rejects_empty_and_malformed_files(tmp_path: Path) -> None:
             probe_video(path)
 
 
+@pytest.mark.parametrize(
+    ("fixture", "expected_output", "expected_poster"),
+    [
+        ("rotated", (360, 640), (360, 640)),
+        ("anamorphic", (768, 576), (640, 480)),
+    ],
+)
+def test_process_video_normalizes_display_geometry(
+    tmp_path: Path,
+    fixture: str,
+    expected_output: tuple[int, int],
+    expected_poster: tuple[int, int],
+) -> None:
+    """Break caught: rotation or non-square pixels distort the MP4 and its poster."""
+    source = tmp_path / f"{fixture}.mp4"
+    if fixture == "rotated":
+        coded = tmp_path / "coded.mp4"
+        _make_video(coded, (640, 360), with_audio=False)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-display_rotation:v:0",
+                "90",
+                "-i",
+                str(coded),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    else:
+        _make_video(source, (720, 576), with_audio=False, video_filter="setsar=16/15")
+    source_probe = probe_video(source)
+    assert (source_probe.width, source_probe.height) == expected_output
+    output = tmp_path / fixture.upper()
+    output.mkdir()
+    primary = output / "00.mp4"
+    poster = output / "00-poster.webp"
+
+    record = process_video(source, primary, poster)
+
+    encoded = probe_video(primary)
+    assert (encoded.width, encoded.height) == expected_output
+    assert encoded.sample_aspect_ratio == (1, 1)
+    assert encoded.rotation_degrees == 0
+    with Image.open(poster) as decoded:
+        decoded.load()
+        assert decoded.size == expected_poster
+    assert (record.asset.width, record.asset.height) == expected_output
+    assert (record.preview.width, record.preview.height) == expected_poster
+
+
+def test_process_video_rejects_truncated_input_and_removes_partial_outputs(tmp_path: Path) -> None:
+    """Break caught: FFmpeg logs lost input packets but returns a shortened successful archive."""
+    source = tmp_path / "truncated.mp4"
+    _make_video(source, (640, 360), with_audio=False, pattern=True)
+    with source.open("r+b") as stream:
+        stream.truncate(source.stat().st_size * 9 // 10)
+    output = tmp_path / "TRUNCATED"
+    output.mkdir()
+
+    with pytest.raises(ValidationError):
+        process_video(source, output / "00.mp4", output / "00-poster.webp")
+
+    assert source.exists()
+    assert tuple(output.iterdir()) == ()
+
+
+def test_process_video_path_collision_preserves_caller_owned_files(tmp_path: Path) -> None:
+    """Break caught: preflight rejection deletes a colliding source or existing poster."""
+    source = tmp_path / "00.mp4"
+    _make_video(source, (320, 240), with_audio=False)
+    poster = tmp_path / "00-poster.webp"
+    poster.write_bytes(b"caller-owned-poster")
+    source_before = source.read_bytes()
+    poster_before = poster.read_bytes()
+
+    with pytest.raises(ValidationError):
+        process_video(source, source, poster)
+
+    assert source.read_bytes() == source_before
+    assert poster.read_bytes() == poster_before
+
+
 def test_process_video_refuses_generated_output_over_95_mib(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,7 +263,14 @@ def test_interrupted_carousel_leaves_no_post_directory_or_manifest_records(
     assert tuple(media_root.iterdir()) == ()
 
 
-def _make_video(path: Path, size: tuple[int, int], *, with_audio: bool) -> None:
+def _make_video(
+    path: Path,
+    size: tuple[int, int],
+    *,
+    with_audio: bool,
+    video_filter: str | None = None,
+    pattern: bool = False,
+) -> None:
     command = [
         "ffmpeg",
         "-nostdin",
@@ -180,10 +280,16 @@ def _make_video(path: Path, size: tuple[int, int], *, with_audio: bool) -> None:
         "-f",
         "lavfi",
         "-i",
-        f"color=c=teal:s={size[0]}x{size[1]}:r=25:d=2",
+        (
+            f"testsrc2=s={size[0]}x{size[1]}:r=25:d=2"
+            if pattern
+            else f"color=c=teal:s={size[0]}x{size[1]}:r=25:d=2"
+        ),
     ]
     if with_audio:
         command.extend(["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=2"])
+    if video_filter is not None:
+        command.extend(["-vf", video_filter])
     command.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
     if with_audio:
         command.extend(["-c:a", "aac", "-b:a", "128k", "-shortest"])
