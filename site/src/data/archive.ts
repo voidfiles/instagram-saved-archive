@@ -116,10 +116,7 @@ function assetPath(value: unknown): string {
   return path;
 }
 
-/** Map a validated snapshot-relative path to a same-origin public URL. */
-export function assetUrl(path: string): string {
-  return `/archive/${assetPath(path).split("/").map(encodeURIComponent).join("/")}`;
-}
+export { assetUrl } from "../lib/public-path";
 
 function readAsset(
   value: unknown,

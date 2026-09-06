@@ -225,6 +225,14 @@ describe("loadArchive", () => {
     expect(assetUrl("media/a #?.webp")).toBe("/archive/media/a%20%23%3F.webp");
     expect(() => assetUrl("../escape")).toThrow();
   });
+  it.each([
+    ["", "/archive/media/a%20%23%3F.webp"],
+    ["/", "/archive/media/a%20%23%3F.webp"],
+    ["/owner-repo", "/owner-repo/archive/media/a%20%23%3F.webp"],
+    ["/owner-repo/", "/owner-repo/archive/media/a%20%23%3F.webp"],
+  ])("maps public media with deployment base %s", (base, expected) => {
+    expect(assetUrl("media/a #?.webp", base)).toBe(expected);
+  });
 });
 
 describe("scriptSafeJson", () => {

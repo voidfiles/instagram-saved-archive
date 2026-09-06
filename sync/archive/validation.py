@@ -35,14 +35,16 @@ def validate_manifest(manifest: object) -> None:
     if not isinstance(manifest.posts, tuple):
         raise ValueError("manifest posts must be a tuple")
 
-    expected_order = tuple(sorted(manifest.posts, key=lambda post: (-post.archived_at.timestamp(), post.shortcode)))
-    if manifest.posts != expected_order:
-        raise ValueError("manifest posts must use deterministic archive order")
-
     shortcodes: set[str] = set()
     asset_paths: set[str] = set()
     for post in manifest.posts:
         _validate_post(post, shortcodes, asset_paths)
+
+    expected_order = tuple(
+        sorted(manifest.posts, key=lambda post: (-post.archived_at.timestamp(), post.shortcode))
+    )
+    if manifest.posts != expected_order:
+        raise ValueError("manifest posts must use deterministic archive order")
 
 
 def _validate_post(post: object, shortcodes: set[str], asset_paths: set[str]) -> None:
@@ -64,7 +66,10 @@ def _validate_post(post: object, shortcodes: set[str], asset_paths: set[str]) ->
     models._require_datetime_utc(post.verified_at, "post.verified_at")
     if not isinstance(post.media_type, models.MediaType):
         raise ValueError("post.media_type is invalid")
-    if post.publication_state is not models.PublicationState.PUBLISHED or post.unpublished_reason is not None:
+    if (
+        post.publication_state is not models.PublicationState.PUBLISHED
+        or post.unpublished_reason is not None
+    ):
         raise ValueError("only published posts without an unpublished reason may be archived")
     if not isinstance(post.media, tuple) or not post.media:
         raise ValueError("post.media must be a non-empty tuple")
@@ -78,9 +83,15 @@ def _validate_post(post: object, shortcodes: set[str], asset_paths: set[str]) ->
         _validate_media(media, positions, asset_paths)
     if positions != set(range(len(post.media))):
         raise ValueError("media positions must be contiguous and zero-based")
-    if post.media_type is models.MediaType.IMAGE and post.media[0].kind is not models.MediaKind.IMAGE:
+    if (
+        post.media_type is models.MediaType.IMAGE
+        and post.media[0].kind is not models.MediaKind.IMAGE
+    ):
         raise ValueError("image posts must contain image media")
-    if post.media_type is models.MediaType.VIDEO and post.media[0].kind is not models.MediaKind.VIDEO:
+    if (
+        post.media_type is models.MediaType.VIDEO
+        and post.media[0].kind is not models.MediaKind.VIDEO
+    ):
         raise ValueError("video posts must contain video media")
 
 

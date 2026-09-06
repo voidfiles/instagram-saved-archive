@@ -8,6 +8,8 @@ __pycache__/
 coverage.xml
 htmlcov/
 .venv/
+/uv.lock
+*.egg-info/
 venv/
 site/public/archive/
 site/node_modules/

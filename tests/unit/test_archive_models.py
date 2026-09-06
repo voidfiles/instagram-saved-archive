@@ -185,14 +185,40 @@ def test_validate_manifest_rejects_a_non_integer_schema_version(
         validation.validate_manifest(invalid_manifest)
 
 
+@pytest.mark.parametrize("malformation", ["member", "archived_at", "shortcode"])
+def test_programmatic_manifest_validates_members_before_sorting(
+    valid_manifest_dict: dict[str, Any], malformation: str
+) -> None:
+    """Break caught: ordering raises AttributeError/TypeError before member validation."""
+    models = importlib.import_module("sync.archive.models")
+    manifest = models.load_manifest(valid_manifest_dict)
+    post = manifest.posts[0]
+    invalid = (
+        object()
+        if malformation == "member"
+        else replace(
+            manifest.posts[1],
+            **{"archived_at": post.archived_at, malformation: None},
+        )
+    )
+    malformed = replace(manifest, posts=(post, invalid))
+    reason = {
+        "member": "ArchivePost",
+        "archived_at": "post.archived_at",
+        "shortcode": "post.shortcode",
+    }[malformation]
+    with pytest.raises(ValueError, match=reason):
+        models.dump_manifest(malformed)
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
         (lambda data: data["posts"].append(deepcopy(data["posts"][0])), "duplicate shortcodes"),
         (
-            lambda data: data["posts"][1]["media"].__setitem__(1, {
-                **data["posts"][1]["media"][1], "position": 0
-            }),
+            lambda data: data["posts"][1]["media"].__setitem__(
+                1, {**data["posts"][1]["media"][1], "position": 0}
+            ),
             "duplicate media positions",
         ),
         (lambda data: data.__setitem__("schema_version", 2), "unknown future schema"),
@@ -214,13 +240,13 @@ def test_validate_manifest_rejects_a_non_integer_schema_version(
             "absolute path",
         ),
         (
-            lambda data: data["posts"][0]["media"][0]["asset"].__setitem__("sha256", "not-a-digest"),
+            lambda data: data["posts"][0]["media"][0]["asset"].__setitem__(
+                "sha256", "not-a-digest"
+            ),
             "invalid SHA-256",
         ),
         (
-            lambda data: data["posts"][0]["media"][0]["asset"].__setitem__(
-                "byte_size", 99_614_721
-            ),
+            lambda data: data["posts"][0]["media"][0]["asset"].__setitem__("byte_size", 99_614_721),
             "primary asset larger than 95 MiB",
         ),
         (
@@ -229,7 +255,10 @@ def test_validate_manifest_rejects_a_non_integer_schema_version(
             ),
             "preview asset larger than 95 MiB",
         ),
-        (lambda data: data["posts"][1]["media"][1].pop("duration_seconds"), "video without duration"),
+        (
+            lambda data: data["posts"][1]["media"][1].pop("duration_seconds"),
+            "video without duration",
+        ),
         (
             lambda data: data["posts"][0]["media"][0].__setitem__("duration_seconds", 3.0),
             "image with duration",

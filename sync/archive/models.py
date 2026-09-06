@@ -91,7 +91,9 @@ def load_manifest(data: object) -> Manifest:
     root = _strict_object(data, {"schema_version", "posts"}, "manifest")
     _require_schema_version(root, "manifest")
     posts_data = _require_list(root["posts"], "manifest.posts")
-    posts = tuple(_load_post(item, f"manifest.posts[{index}]") for index, item in enumerate(posts_data))
+    posts = tuple(
+        _load_post(item, f"manifest.posts[{index}]") for index, item in enumerate(posts_data)
+    )
     manifest = Manifest(schema_version=SCHEMA_VERSION, posts=_sorted_posts(posts))
 
     from .validation import validate_manifest
@@ -139,7 +141,9 @@ def load_sync_state(data: object) -> SyncState:
         consecutive_known_threshold=_require_positive_int(
             root["consecutive_known_threshold"], "sync state.consecutive_known_threshold"
         ),
-        archive_byte_size=_require_nonnegative_int(root["archive_byte_size"], "sync state.archive_byte_size"),
+        archive_byte_size=_require_nonnegative_int(
+            root["archive_byte_size"], "sync state.archive_byte_size"
+        ),
     )
     return state
 
@@ -154,13 +158,17 @@ def dump_sync_state(state: SyncState) -> dict[str, object]:
         state.last_complete_saved_feed_scan_at, "sync state.last_complete_saved_feed_scan_at"
     )
     _require_nonnegative_int(state.reconciliation_cursor, "sync state.reconciliation_cursor")
-    _require_positive_int(state.consecutive_known_threshold, "sync state.consecutive_known_threshold")
+    _require_positive_int(
+        state.consecutive_known_threshold, "sync state.consecutive_known_threshold"
+    )
     _require_nonnegative_int(state.archive_byte_size, "sync state.archive_byte_size")
     return {
         "schema_version": SCHEMA_VERSION,
         "backfill_complete": state.backfill_complete,
         "last_successful_sync_at": _dump_optional_utc(state.last_successful_sync_at),
-        "last_complete_saved_feed_scan_at": _dump_optional_utc(state.last_complete_saved_feed_scan_at),
+        "last_complete_saved_feed_scan_at": _dump_optional_utc(
+            state.last_complete_saved_feed_scan_at
+        ),
         "reconciliation_cursor": state.reconciliation_cursor,
         "consecutive_known_threshold": state.consecutive_known_threshold,
         "archive_byte_size": state.archive_byte_size,
@@ -185,10 +193,14 @@ def _load_post(data: object, context: str) -> ArchivePost:
     value = _strict_object(data, keys, context)
     _load_unpublished_reason(value["unpublished_reason"], f"{context}.unpublished_reason")
     media_data = _require_list(value["media"], f"{context}.media")
-    media = tuple(_load_media(item, f"{context}.media[{index}]") for index, item in enumerate(media_data))
+    media = tuple(
+        _load_media(item, f"{context}.media[{index}]") for index, item in enumerate(media_data)
+    )
     return ArchivePost(
         shortcode=_require_shortcode(value["shortcode"], f"{context}.shortcode"),
-        creator_username=_require_nonempty_string(value["creator_username"], f"{context}.creator_username"),
+        creator_username=_require_nonempty_string(
+            value["creator_username"], f"{context}.creator_username"
+        ),
         creator_id=_require_positive_int(value["creator_id"], f"{context}.creator_id"),
         source_url=_require_source_url(value["source_url"], f"{context}.source_url"),
         caption=_normalize_caption(value["caption"], f"{context}.caption"),
@@ -206,7 +218,10 @@ def _load_post(data: object, context: str) -> ArchivePost:
 
 def _load_media(data: object, context: str) -> MediaRecord:
     value = _strict_object(
-        data, {"position", "kind", "asset", "preview", "duration_seconds"}, context, optional={"duration_seconds"}
+        data,
+        {"position", "kind", "asset", "preview", "duration_seconds"},
+        context,
+        optional={"duration_seconds"},
     )
     kind = _require_media_kind(value["kind"], f"{context}.kind")
     duration = value.get("duration_seconds")
@@ -348,7 +363,12 @@ def _load_unpublished_reason(value: object, context: str) -> None:
 
 
 def _require_positive_float(value: object, context: str) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise ValueError(f"{context} must be a positive finite number")
     return float(value)
 
@@ -374,7 +394,11 @@ def _validate_optional_utc(value: datetime | None, context: str) -> None:
 
 
 def _require_datetime_utc(value: object, context: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != UTC.utcoffset(None):
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() != UTC.utcoffset(None)
+    ):
         raise ValueError(f"{context} must be a UTC datetime")
     return value.astimezone(UTC)
 

@@ -2,6 +2,11 @@
   "name": "instagram-saved-archive-site",
   "private": true,
   "version": "0.1.0",
+  "description": "An accessible static feed for the Instagram saved archive",
+  "license": "MIT",
+  "engines": {
+    "node": "24.x"
+  },
   "type": "module",
   "scripts": {
     "check": "astro check",

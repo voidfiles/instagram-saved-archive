@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { JSDOM } from "jsdom";
 
 const site = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const publicBase = (process.env.ASTRO_BASE_PATH || "").replace(/\/+$/, "");
 const args = process.argv.slice(2);
 const root = resolve(
   args.length === 2 && args[0] === "--root" ? args[1] : join(site, "dist"),
@@ -59,8 +60,10 @@ async function check() {
       decoded.split("/").includes("..")
     )
       throw new Error(`Escaping local reference: ${value}`);
+    if (decoded.startsWith("/") && !decoded.startsWith(`${publicBase}/`))
+      throw new Error(`Local reference is outside deployment base: ${value}`);
     const path = decoded.startsWith("/")
-      ? decoded.slice(1)
+      ? decoded.slice(publicBase.length + 1)
       : join(dirname(base), decoded).split(sep).join("/");
     if (!files.has(path === "" ? "index.html" : path))
       throw new Error(`Missing local reference: ${value}`);
@@ -69,7 +72,7 @@ async function check() {
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
       if (key === "asset_path" && typeof child === "string")
-        reference(`/archive/${child}`, "index.html", true);
+        reference(`${publicBase}/archive/${child}`, "index.html", true);
       else assets(child);
     }
   }
@@ -123,12 +126,11 @@ async function check() {
   // The Python command owns both thresholds; do not duplicate budget arithmetic here.
   function verifyBudget() {
     const result = spawnSync(
-      "uv",
-      ["run", "python", "-m", "sync.cli", "check-budget", "--root", root],
+      process.env.PYTHON || "python",
+      ["-m", "sync.cli", "check-budget", "--root", root],
       {
         cwd: resolve(site, ".."),
         encoding: "utf8",
-        env: { ...process.env, UV_OFFLINE: "1" },
       },
     );
     if (result.error)

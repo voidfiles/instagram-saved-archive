@@ -1,15 +1,6 @@
 import type { ArchivePost } from "../data/archive";
 
-// This boundary must remain browser-only: the build-time loader uses node:fs.
-function localAssetUrl(path: string): string {
-  if (
-    /[\\:\0]/.test(path) ||
-    path.split("/").some((part) => !part || part === "." || part === "..")
-  ) {
-    throw new Error("Invalid local asset path");
-  }
-  return `/archive/${path.split("/").map(encodeURIComponent).join("/")}`;
-}
+import { assetUrl } from "./public-path";
 
 /** Keep markup and accessibility hooks aligned with PostCard, MediaGallery and Caption. */
 export function renderPost(post: ArchivePost, document: Document): HTMLElement {
@@ -91,8 +82,8 @@ export function renderPost(post: ArchivePost, document: Document): HTMLElement {
         ? `${index + 1} of ${post.media.length}`
         : undefined,
     });
-    const asset = localAssetUrl(item.asset.asset_path);
-    const preview = localAssetUrl(item.preview.asset_path);
+    const asset = assetUrl(item.asset.asset_path);
+    const preview = assetUrl(item.preview.asset_path);
     if (item.kind === "image") {
       figure.append(
         element("img", {

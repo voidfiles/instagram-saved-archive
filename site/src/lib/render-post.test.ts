@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ArchivePost, MediaRecord } from "../data/archive";
 import { renderPost } from "./render-post";
 
@@ -39,6 +39,46 @@ const post: ArchivePost = {
 };
 
 describe("renderPost", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it("prefixes dynamically rendered images, srcsets, video posters and downloads", () => {
+    vi.stubEnv("BASE_URL", "/owner-repo/");
+    const row = renderPost(
+      {
+        ...post,
+        media_type: "carousel",
+        media: [
+          media,
+          {
+            ...media,
+            position: 1,
+            kind: "video",
+            duration_seconds: 2,
+            asset: {
+              ...media.asset,
+              asset_path: "media/A/1.mp4",
+              mime_type: "video/mp4",
+            },
+          },
+        ],
+      },
+      document,
+    );
+    expect(row.querySelector("img")?.getAttribute("src")).toBe(
+      "/owner-repo/archive/media/A/a%20%23%3F.webp",
+    );
+    expect(row.querySelector("img")?.getAttribute("srcset")).toBe(
+      "/owner-repo/archive/media/A/preview.webp 320w, /owner-repo/archive/media/A/a%20%23%3F.webp 640w",
+    );
+    expect(row.querySelector("video")?.getAttribute("poster")).toBe(
+      "/owner-repo/archive/media/A/preview.webp",
+    );
+    expect(row.querySelector("source")?.getAttribute("src")).toBe(
+      "/owner-repo/archive/media/A/1.mp4",
+    );
+    expect(row.querySelector("video a")?.getAttribute("href")).toBe(
+      "/owner-repo/archive/media/A/1.mp4",
+    );
+  });
   it("renders attribution, dates, and responsive local media with server-compatible hooks", () => {
     const row = renderPost(post, document);
     expect(row.dataset.shortcode).toBe("A");

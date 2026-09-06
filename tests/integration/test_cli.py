@@ -1,5 +1,6 @@
 """CLI process contracts and real sync composition without Instagram access."""
 
+import base64
 import importlib
 import json
 import os
@@ -213,3 +214,68 @@ def test_init_snapshot_supports_existing_empty_directory(tmp_path: Path) -> None
     result = cli("init-snapshot", "--snapshot", str(snapshot))
     assert result.returncode == 0, result.stderr
     assert SnapshotStore(snapshot).load()[0].posts == ()
+
+
+def test_bootstrap_stdout_is_only_base64_and_interactive_output_goes_to_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Break caught: a prompt, saved-file notice, or JSON contaminates a secret pipe."""
+    from sync.bootstrap_session import bootstrap_session
+
+    class Loader:
+        def interactive_login(self, username: str) -> None:
+            assert username == "archive_owner"
+            print("Interactive login and two-factor prompt")
+
+        def test_login(self) -> str:
+            print("Checking authenticated identity")
+            return "archive_owner"
+
+        def save_session_to_file(self, filename: str) -> None:
+            Path(filename).write_bytes(b"synthetic-session")
+            print("Saved session notice")
+
+    boundary = module()
+    monkeypatch.setattr(
+        boundary,
+        "bootstrap_session",
+        lambda username: bootstrap_session(username, loader_factory=lambda **_: Loader()),
+        raising=False,
+    )
+    assert boundary.main(["bootstrap-session", "--username", "archive_owner"]) == 0
+    output = capsys.readouterr()
+    assert output.out == base64.b64encode(b"synthetic-session").decode() + "\n"
+    assert "Interactive login and two-factor prompt" in output.err
+    assert "Checking authenticated identity" in output.err
+    assert "Saved session notice" in output.err
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [(AuthenticationError, 20), (RuntimeError, 1), (EOFError, 20), (KeyboardInterrupt, 20)],
+)
+def test_bootstrap_failure_has_empty_stdout_and_sanitized_stable_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure,
+    expected: int,
+) -> None:
+    boundary = module()
+
+    def fail(username: str) -> str:
+        raise failure("synthetic-sensitive-value")
+
+    monkeypatch.setattr(boundary, "bootstrap_session", fail, raising=False)
+    assert boundary.main(["bootstrap-session", "--username", "archive_owner"]) == expected
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err.strip()
+    assert "synthetic-sensitive-value" not in output.err
+    assert "Traceback" not in output.err
+
+
+def test_bootstrap_missing_username_does_not_emit_json_into_secret_pipe() -> None:
+    result = cli("bootstrap-session")
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "Invalid command arguments" in result.stderr

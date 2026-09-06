@@ -13,11 +13,11 @@ async function fixture(t, html = '<img src="/archive/media/SAMPLE/0.webp">') {
   await writeFile(join(root, "archive/media/SAMPLE/0.webp"), "image");
   return root;
 }
-function run(root) {
+function run(root, env = {}) {
   const result = spawnSync(
     process.execPath,
     ["scripts/check-static-output.mjs", "--root", root],
-    { encoding: "utf8" },
+    { encoding: "utf8", env: { ...process.env, ASTRO_BASE_PATH: "", ...env } },
   );
   assert.ok(result.stdout.trim(), result.stderr);
   return { ...result, report: JSON.parse(result.stdout) };
@@ -27,6 +27,57 @@ test("accepts local output and reports exact Python CLI budget", async (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.report.budget.level, "ok");
   assert.ok(result.report.budget.total_bytes > 5);
+});
+test("uses an explicit PYTHON interpreter and never silently falls back", async (t) => {
+  const root = await fixture(t);
+  const result = run(root, { PYTHON: join(root, "missing-python") });
+  assert.notEqual(result.status, 0);
+  assert.match(result.report.error, /Budget CLI failed/);
+});
+test("defaults to python on PATH without requiring uv", async (t) => {
+  const interpreter = spawnSync(
+    process.env.PYTHON || "python",
+    ["-c", "import sys; print(sys.executable)"],
+    { encoding: "utf8" },
+  );
+  assert.equal(interpreter.status, 0, interpreter.stderr);
+  const root = await fixture(t);
+  const bin = await mkdtemp(join(tmpdir(), "static-python-"));
+  t.after(() => rm(bin, { recursive: true, force: true }));
+  const executable = interpreter.stdout.trim();
+  // A bare symlink outside a venv loses pyvenv.cfg discovery; exec the real interpreter.
+  await writeFile(
+    join(bin, "python"),
+    `#!${executable}\nimport os, sys\nos.execv(${JSON.stringify(executable)}, [${JSON.stringify(executable)}, *sys.argv[1:]])\n`,
+    { mode: 0o700 },
+  );
+  const result = run(root, { PYTHON: "", PATH: bin });
+  assert.equal(result.status, 0, result.report.error);
+  assert.equal(result.report.budget.level, "ok");
+});
+for (const base of ["/owner-repo", "/owner-repo/"])
+  test(`accepts ${base} URLs mapped to unchanged artifact paths`, async (t) => {
+    const root = await fixture(
+      t,
+      '<script src="/owner-repo/_astro/client.js"></script><link rel="stylesheet" href="/owner-repo/_astro/style.css"><img src="/owner-repo/archive/media/SAMPLE/0.webp" srcset="/owner-repo/archive/media/SAMPLE/0.webp 320w"><video poster="/owner-repo/archive/media/SAMPLE/0.webp"></video>',
+    );
+    await mkdir(join(root, "_astro"));
+    await writeFile(join(root, "_astro/client.js"), "");
+    await writeFile(
+      join(root, "_astro/style.css"),
+      '.x{background:url("/owner-repo/archive/media/SAMPLE/0.webp")}',
+    );
+    await writeFile(
+      join(root, "archive/manifest.json"),
+      JSON.stringify({ asset: { asset_path: "media/SAMPLE/0.webp" } }),
+    );
+    const result = run(root, { ASTRO_BASE_PATH: base });
+    assert.equal(result.status, 0, result.report.error);
+  });
+test("rejects unprefixed root media for a project deployment", async (t) => {
+  const result = run(await fixture(t), { ASTRO_BASE_PATH: "/owner-repo" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.report.error, /base|reference/i);
 });
 for (const [name, html] of [
   ["missing asset", '<img src="/archive/media/missing.webp">'],

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from contextlib import redirect_stdout
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import NoReturn
 from sync.archive.budget import BudgetStatus, check_budget
 from sync.archive.publisher import publish_snapshot
 from sync.archive.store import SnapshotStore
+from sync.bootstrap_session import bootstrap_session
 from sync.engine import SyncEngine, SyncOptions
 from sync.instagram.client import InstaloaderClient
 from sync.instagram.errors import ArchiveError, AuthenticationError, ValidationError
@@ -49,6 +51,8 @@ def _bounded_integer(minimum: int, maximum: int | None = None) -> Callable[[str]
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="instagram-saved-archive", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
+    bootstrap = commands.add_parser("bootstrap-session", allow_abbrev=False)
+    bootstrap.add_argument("--username", required=True)
     for name in (
         "init-snapshot",
         "validate-snapshot",
@@ -150,8 +154,20 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
 
 def main(argv: list[str] | None = None) -> int:
     """Execute one command; argument failures are 2, operational failures use ArchiveError codes."""
+    arguments = sys.argv[1:] if argv is None else argv
+    is_bootstrap = arguments[:1] == ["bootstrap-session"]
     try:
-        args = _parser().parse_args(argv)
+        args = _parser().parse_args(arguments)
+        if is_bootstrap:
+            # Instaloader prints interactive prompts and save notices to stdout.
+            # Keep the secret pipe reserved for the completed encoded credential.
+            try:
+                with redirect_stdout(sys.stderr):
+                    encoded = bootstrap_session(args.username)
+            except (EOFError, KeyboardInterrupt):
+                raise AuthenticationError() from None
+            print(encoded)
+            return 0
         result, diagnostic, code = _execute(args)
     except _ArgumentsError:
         code = 2
@@ -169,7 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         code = 1
         result = {"status": "error", "exit_code": code}
         diagnostic = "Archive operation failed unexpectedly.\n"
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if not is_bootstrap:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     print(diagnostic, file=sys.stderr, end="")
     return code
 

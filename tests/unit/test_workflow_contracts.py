@@ -241,10 +241,10 @@ DEPLOY_STEP_NAMES = (
     "Synchronize Instagram",
     "Validate production snapshot",
     "Prepare production site input",
+    "Configure Pages",
     "Build production site",
     "Check production static output",
     "Publish archive snapshot",
-    "Configure Pages",
     "Upload Pages artifact",
     "Deploy Pages",
 )
@@ -342,6 +342,11 @@ def _assert_deployment_contract(workflow: Mapping[object, object]) -> None:
         assert step.get("uses") == action
         assert step.get("with") == options
     assert _step_by_name(steps, "Deploy Pages").get("id") == "deployment"
+    assert _step_by_name(steps, "Configure Pages").get("id") == "pages"
+    production_build = _step_by_name(steps, "Build production site")
+    production_check = _step_by_name(steps, "Check production static output")
+    for step in (production_build, production_check):
+        assert step.get("env") == {"ASTRO_BASE_PATH": "${{ steps.pages.outputs.base_path }}"}
     restore = _step_by_name(steps, "Restore archive snapshot")
     publish = _step_by_name(steps, "Publish archive snapshot")
     sync = _step_by_name(steps, "Synchronize Instagram")
@@ -367,7 +372,7 @@ def _assert_deployment_contract(workflow: Mapping[object, object]) -> None:
         run = str(step.get("run", ""))
         assert "${{" not in run, "untrusted expressions must enter shell scripts through env"
         assert not any(text in run.lower() for text in ("set -x", "printenv", "password"))
-        if step not in (restore, publish, sync):
+        if step not in (restore, publish, sync, production_build, production_check):
             assert "env" not in step
         if step != sync:
             assert "GITHUB_STEP_SUMMARY" not in run
@@ -410,6 +415,9 @@ def test_deployment_requires_serialized_secure_publication_after_all_gates() -> 
         "artifact",
         "summary",
         "secret_scope",
+        "pages_order",
+        "build_base",
+        "checker_base",
     ],
 )
 def test_deployment_contract_rejects_security_and_order_mutations(mutation: str) -> None:
@@ -448,6 +456,13 @@ def test_deployment_contract_rejects_security_and_order_mutations(mutation: str)
         )
     elif mutation == "secret_scope":
         job["env"]["INSTAGRAM_SESSION_B64"] = "${{ secrets.INSTAGRAM_SESSION_B64 }}"
+    elif mutation == "pages_order":
+        i = _step_index(steps, "Configure Pages")
+        steps[i], steps[i + 1] = steps[i + 1], steps[i]
+    elif mutation == "build_base":
+        _step_by_name(steps, "Build production site")["env"] = {}
+    elif mutation == "checker_base":
+        _step_by_name(steps, "Check production static output")["env"] = {}
     with pytest.raises(AssertionError):
         _assert_deployment_contract(workflow)
 
