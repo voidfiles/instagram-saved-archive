@@ -270,3 +270,176 @@ def test_swap_fsync_interruption_rolls_back_both_directory_names(
     assert interrupted
     assert harness.snapshot_bytes() == before
     assert sorted(path.name for path in tmp_path.iterdir()) == ["removals.txt", "snapshot"]
+
+
+@pytest.mark.parametrize("when", ["rename", "fsync"])
+def test_empty_original_is_restored_after_backup_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    import shutil
+
+    from sync import engine
+
+    harness = SyncHarness(tmp_path)
+    shutil.rmtree(harness.snapshot)
+    harness.snapshot.mkdir()
+    original_inode = harness.snapshot.stat().st_ino
+    backup = tmp_path / ".snapshot.backup"
+    real_replace = os.replace
+    real_fsync = engine._fsync_directory
+    interrupted = False
+
+    def interrupt_rename(source: str | Path, destination: str | Path) -> None:
+        nonlocal interrupted
+        real_replace(source, destination)
+        if Path(destination) == backup and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    def interrupt_fsync(directory: Path) -> None:
+        nonlocal interrupted
+        real_fsync(directory)
+        if directory == tmp_path and backup.exists() and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    if when == "rename":
+        monkeypatch.setattr("sync.engine.os.replace", interrupt_rename)
+    else:
+        monkeypatch.setattr(engine, "_fsync_directory", interrupt_fsync)
+    with pytest.raises(KeyboardInterrupt):
+        harness.run()
+    assert interrupted
+    assert harness.snapshot.stat().st_ino == original_inode
+    assert list(harness.snapshot.iterdir()) == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["removals.txt", "snapshot"]
+    assert harness.run().backfill_complete
+
+
+@pytest.mark.parametrize("when", ["before_backup", "after_backup", "after_install"])
+def test_empty_original_hard_restart_uses_durable_transaction_ownership(
+    tmp_path: Path, when: str
+) -> None:
+    import shutil
+    import subprocess
+    import sys
+    import textwrap
+
+    harness = SyncHarness(tmp_path)
+    shutil.rmtree(harness.snapshot)
+    harness.snapshot.mkdir()
+    code = textwrap.dedent("""
+        import os
+        import sys
+        from pathlib import Path
+        from sync import engine
+        from tests.integration.fakes import FakeInstagramClient, NOW
+
+        root = Path(sys.argv[1])
+        when = sys.argv[2]
+        marker = root / '.snapshot.swap-transaction.json'
+        real_replace = os.replace
+        real_fsync = os.fsync
+        synced = set()
+
+        def fsync(fd):
+            real_fsync(fd)
+            stat = os.fstat(fd)
+            synced.add((stat.st_dev, stat.st_ino))
+
+        def replace(source, destination):
+            if Path(destination) == root / '.snapshot.backup':
+                if not marker.exists():
+                    os._exit(78)
+                for path in (marker, root):
+                    stat = path.stat()
+                    if (stat.st_dev, stat.st_ino) not in synced:
+                        os._exit(79)
+                if when == 'before_backup':
+                    os._exit(77)
+            real_replace(source, destination)
+            if when == 'after_backup' and Path(destination) == root / '.snapshot.backup':
+                os._exit(77)
+            if when == 'after_install' and Path(destination) == root / 'snapshot':
+                os._exit(77)
+
+        engine.os.fsync = fsync
+        engine.os.replace = replace
+        engine.SyncEngine(FakeInstagramClient()).run(
+            root / 'snapshot', root / 'removals.txt', NOW, engine.SyncOptions()
+        )
+    """)
+    child = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path), when],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert child.returncode == 77, child.stderr.decode()
+    harness.client.feed_failure = RuntimeError("stop after recovery")
+    with pytest.raises(RuntimeError, match="stop after recovery"):
+        harness.run()
+    if when != "after_install":
+        assert list(harness.snapshot.iterdir()) == []
+    else:
+        store = SnapshotStore(harness.snapshot)
+        store.validate_files(store.load()[0])
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["removals.txt", "snapshot"]
+    harness.client.feed_failure = None
+    assert harness.run().backfill_complete
+
+
+@pytest.mark.parametrize("with_marker", [False, True])
+def test_empty_recovery_refuses_unrecognized_backup_ownership(
+    tmp_path: Path, with_marker: bool
+) -> None:
+    import json
+
+    harness = SyncHarness(tmp_path)
+    backup = tmp_path / ".snapshot.backup"
+    backup.mkdir()
+    original_inode = backup.stat().st_ino
+    marker = tmp_path / ".snapshot.swap-transaction.json"
+    if with_marker:
+        marker.write_text(json.dumps({"stage": "../unrelated", "original_inode": 1}))
+    before = harness.snapshot_bytes()
+    with pytest.raises((ValueError, ValidationError)):
+        harness.run()
+    assert backup.stat().st_ino == original_inode
+    assert list(backup.iterdir()) == []
+    assert harness.snapshot_bytes() == before
+    assert marker.exists() is with_marker
+
+
+def test_swap_marker_cannot_claim_a_different_backup_directory(tmp_path: Path) -> None:
+    import json
+    import shutil
+
+    harness = SyncHarness(tmp_path)
+    stage = tmp_path / ".snapshot.staging-owned"
+    shutil.copytree(harness.snapshot, stage)
+    original = tmp_path / "preserved-original"
+    harness.snapshot.rename(original)
+    backup = tmp_path / ".snapshot.backup"
+    backup.mkdir()
+    backup_inode = backup.stat().st_ino
+    marker = tmp_path / ".snapshot.swap-transaction.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "snapshot_name": "snapshot",
+                "stage_name": stage.name,
+                "original_identity": [original.stat().st_dev, original.stat().st_ino],
+                "stage_identity": [stage.stat().st_dev, stage.stat().st_ino],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError, match="backup does not belong"):
+        harness.run()
+    assert backup.stat().st_ino == backup_inode
+    assert list(backup.iterdir()) == []
+    assert not harness.snapshot.exists()
+    assert original.is_dir()
+    assert stage.is_dir()
+    assert marker.is_file()
