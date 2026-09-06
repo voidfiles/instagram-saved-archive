@@ -1,0 +1,250 @@
+name: Sync archive and deploy Pages
+
+on:
+  schedule:
+    - cron: "17 10 * * *"
+  workflow_dispatch:
+    inputs:
+      full_scan:
+        description: Scan the complete saved feed
+        type: boolean
+        default: false
+        required: false
+      max_new_posts:
+        description: Maximum new posts to archive (1–50)
+        type: number
+        default: 50
+        required: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: instagram-saved-archive-sync-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  sync-and-deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      SNAPSHOT: ${{ runner.temp }}/archive-snapshot
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+        timeout-minutes: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+        timeout-minutes: 3
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+        timeout-minutes: 3
+
+      - name: Check FFmpeg
+        run: ffmpeg -version
+        timeout-minutes: 1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group dev -e .
+        timeout-minutes: 5
+
+      - name: Run Python checks
+        run: |
+          python -m ruff format --check .
+          python -m ruff check .
+          python -m mypy sync
+          python -m pytest -q
+        timeout-minutes: 10
+
+      - name: Generate and validate offline archive fixture
+        run: |
+          python tests/fixtures/build_sample_archive.py --output .tmp/sample-archive
+          python -m sync.cli validate-snapshot --snapshot .tmp/sample-archive
+          python -m sync.cli prepare-site-input --snapshot .tmp/sample-archive --destination site/public/archive
+        timeout-minutes: 5
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+        timeout-minutes: 5
+
+      - name: Check site
+        working-directory: site
+        run: npm run check
+        timeout-minutes: 5
+
+      - name: Test site
+        working-directory: site
+        run: npm test
+        timeout-minutes: 5
+
+      - name: Build site
+        working-directory: site
+        run: npm run build
+        timeout-minutes: 5
+
+      - name: Check static output
+        working-directory: site
+        run: npm run check:static
+        timeout-minutes: 5
+
+      - name: Install Playwright Chromium
+        working-directory: site
+        run: npx playwright install chromium
+        timeout-minutes: 10
+
+      - name: Run browser tests
+        working-directory: site
+        run: npm run test:e2e
+        timeout-minutes: 10
+
+      - name: Restore archive snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          mkdir "$SNAPSHOT"
+          status=0
+          git ls-remote --exit-code --heads "$remote" refs/heads/archive-data >/dev/null 2>&1 || status=$?
+          case "$status" in
+            0)
+              if ! git fetch --no-tags --depth=1 "$remote" refs/heads/archive-data >/dev/null 2>&1; then
+                echo "Archive fetch failed." >&2
+                exit 1
+              fi
+              git archive FETCH_HEAD | tar -x -C "$SNAPSHOT"
+              ;;
+            2)
+              python -m sync.cli init-snapshot --snapshot "$SNAPSHOT"
+              ;;
+            *)
+              echo "Archive branch lookup failed." >&2
+              exit 1
+              ;;
+          esac
+        timeout-minutes: 5
+
+      - name: Synchronize Instagram
+        env:
+          INSTAGRAM_USERNAME: ${{ vars.INSTAGRAM_USERNAME }}
+          INSTAGRAM_SESSION_B64: ${{ secrets.INSTAGRAM_SESSION_B64 }}
+          FULL_SCAN: ${{ inputs.full_scan == true }}
+          MAX_NEW_POSTS: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.max_new_posts) || '50' }}
+        run: |
+          printf '::add-mask::%s\n' "$INSTAGRAM_USERNAME"
+          set -euo pipefail
+          umask 077
+          session="$RUNNER_TEMP/instagram.session"
+          trap 'rm -f -- "$session" "$RUNNER_TEMP/sync-result.json" "$RUNNER_TEMP/sync-summary.txt" "$RUNNER_TEMP/removals.txt"' EXIT
+          if [[ ! "$INSTAGRAM_USERNAME" =~ ^[A-Za-z0-9._]{1,30}$ ]]; then
+            echo "Invalid Instagram username configuration." >&2
+            exit 2
+          fi
+          if [[ ! "$MAX_NEW_POSTS" =~ ^([1-9]|[1-4][0-9]|50)$ ]]; then
+            echo "Maximum new posts must be an integer from 1 to 50." >&2
+            exit 2
+          fi
+          scan_args=()
+          case "$FULL_SCAN" in
+            true) scan_args+=(--full-scan) ;;
+            false) ;;
+            *) exit 2 ;;
+          esac
+          printf '%s' "$INSTAGRAM_SESSION_B64" | base64 --decode > "$session"
+          chmod 600 "$session"
+          removals="$GITHUB_WORKSPACE/config/removals.txt"
+          if [[ ! -f "$removals" ]]; then
+            removals="$RUNNER_TEMP/removals.txt"
+            : > "$removals"
+          fi
+          # The CLI validates authenticated identity before its engine reads saved posts.
+          status=0
+          python -m sync.cli sync --snapshot "$SNAPSHOT" --session "$session" \
+            --username "$INSTAGRAM_USERNAME" --removals "$removals" \
+            --max-new-posts "$MAX_NEW_POSTS" "${scan_args[@]}" \
+            > "$RUNNER_TEMP/sync-result.json" 2> "$RUNNER_TEMP/sync-summary.txt" || status=$?
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from sync.reporting import SecretRedactor
+
+          redactor = SecretRedactor([
+              os.environ["INSTAGRAM_USERNAME"],
+              os.environ["INSTAGRAM_SESSION_B64"],
+          ])
+          summary = (Path(os.environ["RUNNER_TEMP"]) / "sync-summary.txt").read_text()
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as output:
+              output.write(redactor.redact(summary))
+          PY
+          exit "$status"
+        timeout-minutes: 30
+
+      - name: Validate production snapshot
+        run: python -m sync.cli validate-snapshot --snapshot "$SNAPSHOT"
+        timeout-minutes: 5
+
+      - name: Prepare production site input
+        run: python -m sync.cli prepare-site-input --snapshot "$SNAPSHOT" --destination site/public/archive
+        timeout-minutes: 5
+
+      - name: Build production site
+        working-directory: site
+        run: npm run build
+        timeout-minutes: 5
+
+      - name: Check production static output
+        working-directory: site
+        run: npm run check:static
+        timeout-minutes: 5
+
+      - name: Publish archive snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          python -m sync.cli publish-snapshot --snapshot "$SNAPSHOT" \
+            --source-repository "$GITHUB_WORKSPACE" \
+            --expected-repository "$GITHUB_REPOSITORY" --remote-url "$remote"
+        timeout-minutes: 10
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+        timeout-minutes: 2
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/dist
+        timeout-minutes: 10
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+        timeout-minutes: 10
