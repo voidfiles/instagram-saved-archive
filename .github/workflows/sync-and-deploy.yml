@@ -36,8 +36,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      SNAPSHOT: ${{ runner.temp }}/archive-snapshot
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -45,6 +43,10 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
         timeout-minutes: 2
+
+      - name: Initialize runtime paths
+        run: printf 'SNAPSHOT=%s/archive-snapshot\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        timeout-minutes: 1
 
       - name: Set up Python
         uses: actions/setup-python@v7

@@ -12,59 +12,47 @@ The [MIT license](LICENSE) covers this repository's code and documentation only.
 
 ## Local setup
 
-Use Python **3.12**, Node.js **24**, and **FFmpeg 6+** with `ffmpeg` and `ffprobe` on `PATH` (including H.264/libx264 support). The commands below use Bash on Linux/macOS. Install Git and the GitHub CLI (`gh`) too. Use a repository you own with a `main` branch and GitHub Pages/Actions available; fork or copy this project into it first.
+Use Python **3.12**, Node.js **24**, and **FFmpeg 6+** with `ffmpeg` and `ffprobe` on `PATH` (including H.264/libx264 support). Install Git, [uv](https://docs.astral.sh/uv/), and the GitHub CLI (`gh`) too. The commands below use Bash on Linux/macOS. Use a repository you own with a `main` branch and GitHub Pages/Actions available; fork or copy this project into it first.
 
-On Debian/Ubuntu, install the matching `python3.12-venv` package if `python3.12 -m venv` reports that `ensurepip` is unavailable. The virtual environment must include pip before continuing.
-
-Replace the two example values, authenticate `gh`, and clone your repository:
+Authenticate `gh`, clone your repository, and run the setup recipe:
 
 ```bash
 ARCHIVE_REPOSITORY=YOUR_GITHUB_OWNER/YOUR_REPOSITORY
-INSTAGRAM_USERNAME=YOUR_INSTAGRAM_USERNAME
 gh auth login
 gh repo clone "$ARCHIVE_REPOSITORY" instagram-saved-archive
 cd instagram-saved-archive
-python3.12 -m venv .venv
-source .venv/bin/activate
-python --version
-node --version
-ffmpeg -version
-ffprobe -version
-python -m pip install --upgrade pip
-python -m pip install --group dev -e .
-(cd site && npm ci)
+just setup
 ```
 
-The pip upgrade supplies support for `--group dev` (pip 25.1+). Python dependencies are pinned in `pyproject.toml`; site dependencies are pinned in `site/package-lock.json`. Keep those pins and use `npm ci`. Production installation uses pip, not uv. In a new shell, return to the repository, activate `.venv`, and set the two example variables again. The static checker invokes `python` from the active environment; an optional `PYTHON=/absolute/path/to/python` selects another interpreter with the package installed.
+`just setup` verifies GitHub authentication and the Node/FFmpeg tools, installs the pinned site dependencies with `npm ci`, then runs `uv sync --python 3.12 --group dev` to create or update `.venv` and install Python dependencies. Python dependencies are pinned in `pyproject.toml`; site dependencies are pinned in `site/package-lock.json`. In a new shell, use `uv run` or `just` recipes instead of activating `.venv` manually. The static checker accepts an optional `PYTHON=/absolute/path/to/python` when run directly.
 
 ## Configure GitHub and bootstrap your session
 
 In your repository's **Settings → Pages → Build and deployment**, set **Source** to **GitHub Actions**. Enable Actions if prompted for a fork. Allow the sync workflow's requested contents, Pages, and identity-token permissions; repository or organization policies must permit these permissions and updates to the `archive-data` branch. The workflow deploys through the `github-pages` environment, so check any environment approval rules too.
 
-Set the repository Actions variable `INSTAGRAM_USERNAME` and the repository Actions secret `INSTAGRAM_SESSION_B64`. Create the session **locally in an interactive terminal**, with your password and any two-factor code entered only at the prompts:
+Set the repository Actions variable `INSTAGRAM_USERNAME` and the repository Actions secret `INSTAGRAM_SESSION_B64`. Create the session **locally in an interactive terminal** while signed in to the target Instagram account in Chrome:
 
 ```bash
-gh variable set INSTAGRAM_USERNAME --repo "$ARCHIVE_REPOSITORY" --body "$INSTAGRAM_USERNAME"
-set -o pipefail
-instagram-saved-archive bootstrap-session --username "$INSTAGRAM_USERNAME" \
-  | gh secret set INSTAGRAM_SESSION_B64 --repo "$ARCHIVE_REPOSITORY"
+just bootstrap-session
 ```
 
-The bootstrap command keeps password and two-factor prompts on stderr while suppressing raw upstream diagnostics and sanitizing rejected-credential retry messages. Successful stdout contains only the base64 session and one newline; the pipe transfers it directly to GitHub Secrets without a file or clipboard step. Do not combine stderr with stdout (`2>&1`), enable shell tracing (`set -x`), paste the encoded session into source, or upload it as an artifact. Base64 is encoding, not encryption: treat this session as a login credential. Only load sessions you created and trust; the underlying session format is not safe for untrusted input.
+The recipe defaults to `ARCHIVE_REPOSITORY` and `INSTAGRAM_USERNAME` when those environment variables are set, otherwise it uses the setup placeholders. You can also supply both values directly: `just bootstrap-session OWNER/REPOSITORY INSTAGRAM_USERNAME`.
+
+Bootstrap imports Instagram cookies from Chrome, validates that the authenticated account matches the requested username, then emits only the base64 session on stdout. macOS may ask for Keychain access so the local process can decrypt Chrome's cookies. The recipe keeps the session in memory and sends it to GitHub Secrets only after the import succeeds, without a credential file or clipboard step. Do not combine stderr with stdout (`2>&1`), enable shell tracing (`set -x`), paste the encoded session into source, or upload it as an artifact. Base64 is encoding, not encryption: treat this session as a login credential. Only import cookies from a Chrome profile you control.
 
 Bootstrap verifies the authenticated account matches the requested username. Its temporary session file is mode `0600` and is deleted when bootstrap completes or raises an ordinary exception. A forced process kill can prevent cleanup; if that happens, locate only that run's `instagram-session-*` temporary file in the system temporary directory and remove it. The Actions sync also creates a temporary mode `0600` session and removes it on shell exit. Do not retain decoded credentials in the checkout.
 
-If either side of the pipe fails, stop and repeat the session setup successfully before running a sync. Complete any Instagram checkpoint in the official app/site, then retry locally. To replace an expired or revoked session, rerun the same bootstrap-to-`gh secret set` pipe; it replaces `INSTAGRAM_SESSION_B64`. If you change accounts, update `INSTAGRAM_USERNAME` as well. Revoke the account session in Instagram when you no longer want it used, and remove the GitHub secret when retiring the archive.
+If bootstrap fails, the recipe leaves the existing GitHub secret unchanged. Sign in to Instagram in Chrome and complete any account checkpoint in the official app/site, then retry locally. To replace an expired or revoked session, rerun `just bootstrap-session`; it replaces `INSTAGRAM_SESSION_B64` only after a successful import. If you change accounts, update `INSTAGRAM_USERNAME` as well. Revoke the account session in Instagram when you no longer want it used, and remove the GitHub secret when retiring the archive.
 
 ## First run: one post
 
 Start with an empty `config/removals.txt` (the checked-in file is intentionally zero bytes). In **Actions → Sync archive and deploy Pages → Run workflow**, choose `main`, set `max_new_posts` to `1`, and leave `full_scan` false. The equivalent command is:
 
 ```bash
-gh workflow run sync-and-deploy.yml --repo "$ARCHIVE_REPOSITORY" --ref main \
-  -f max_new_posts=1 -f full_scan=false
-gh run list --repo "$ARCHIVE_REPOSITORY" --workflow sync-and-deploy.yml --limit 5
+just live-sync
 ```
+
+Pass another repository explicitly with `just live-sync OWNER/REPOSITORY`.
 
 Open that run and its job summary. The first run restores `archive-data` if it exists, or initializes an empty snapshot when the branch is absent. It authenticates, attempts at most one new eligible public post, validates and exports the result, builds and checks the real site, publishes the snapshot, and finally uploads/deploys Pages. Private or unavailable posts do not consume the new-post allowance. An invalid media item can be skipped, so one attempted post does not guarantee one published post; inspect the aggregate counts and any public media-failure shortcodes.
 

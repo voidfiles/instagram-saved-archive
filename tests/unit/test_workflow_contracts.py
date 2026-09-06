@@ -236,7 +236,9 @@ def test_workflow_contract_rejects_bypass_mutations(original: str, replacement: 
 
 DEPLOY_PATH = WORKFLOW_PATH.with_name("sync-and-deploy.yml")
 DEPLOY_STEP_NAMES = (
-    *EXPECTED_STEP_NAMES[:-1],
+    "Check out source",
+    "Initialize runtime paths",
+    *EXPECTED_STEP_NAMES[1:-1],
     "Restore archive snapshot",
     "Synchronize Instagram",
     "Validate production snapshot",
@@ -267,12 +269,16 @@ def _deployment_steps(workflow: Mapping[object, object]) -> list[Mapping[object,
         "url": "${{ steps.deployment.outputs.page_url }}",
     }
     assert job.get("defaults") == {"run": {"shell": "bash"}}
-    assert job.get("env") == {"SNAPSHOT": "${{ runner.temp }}/archive-snapshot"}
+    assert "env" not in job
     assert "permissions" not in job and "continue-on-error" not in job
     values = _value(job, "steps")
     assert isinstance(values, list)
     steps = [_mapping(step) for step in values]
     assert tuple(step.get("name") for step in steps) == DEPLOY_STEP_NAMES
+    runtime_paths = _step_by_name(steps, "Initialize runtime paths")
+    assert runtime_paths.get("run") == (
+        'printf \'SNAPSHOT=%s/archive-snapshot\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"'
+    )
     for step in steps:
         assert _positive_timeout(step.get("timeout-minutes"))
         assert "if" not in step and "continue-on-error" not in step
@@ -455,7 +461,7 @@ def test_deployment_contract_rejects_security_and_order_mutations(mutation: str)
             '\necho raw >> "$GITHUB_STEP_SUMMARY"'
         )
     elif mutation == "secret_scope":
-        job["env"]["INSTAGRAM_SESSION_B64"] = "${{ secrets.INSTAGRAM_SESSION_B64 }}"
+        job["env"] = {"INSTAGRAM_SESSION_B64": "${{ secrets.INSTAGRAM_SESSION_B64 }}"}
     elif mutation == "pages_order":
         i = _step_index(steps, "Configure Pages")
         steps[i], steps[i + 1] = steps[i + 1], steps[i]

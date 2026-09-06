@@ -16,7 +16,7 @@ from typing import NoReturn
 from sync.archive.budget import BudgetStatus, check_budget
 from sync.archive.publisher import publish_snapshot
 from sync.archive.store import SnapshotStore
-from sync.bootstrap_session import bootstrap_session
+from sync.bootstrap_session import bootstrap_session_from_chrome
 from sync.engine import SyncEngine, SyncOptions, recover_snapshot
 from sync.instagram.client import InstaloaderClient
 from sync.instagram.errors import ArchiveError, AuthenticationError, SizeError, ValidationError
@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             # Keep the secret pipe reserved for the completed encoded credential.
             try:
                 with redirect_stdout(sys.stderr):
-                    encoded = bootstrap_session(args.username)
+                    encoded = bootstrap_session_from_chrome(args.username)
             except (EOFError, KeyboardInterrupt):
                 raise AuthenticationError() from None
             print(encoded)

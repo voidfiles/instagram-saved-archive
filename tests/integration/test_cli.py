@@ -221,43 +221,17 @@ def test_init_snapshot_supports_existing_empty_directory(tmp_path: Path) -> None
 def test_bootstrap_stdout_is_only_base64_and_interactive_output_goes_to_stderr(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Break caught: a prompt, saved-file notice, or JSON contaminates a secret pipe."""
-    from sync.bootstrap_session import bootstrap_session
-
-    class Loader:
-        context = SimpleNamespace(error_log=[])
-
-        def login(self, username: str, password: str) -> None:
-            pass
-
-        def two_factor_login(self, code: str) -> None:
-            pass
-
-        def interactive_login(self, username: str) -> None:
-            assert username == "archive_owner"
-            print("Interactive login and two-factor prompt")
-
-        def test_login(self) -> str:
-            print("Checking authenticated identity")
-            return "archive_owner"
-
-        def save_session_to_file(self, filename: str) -> None:
-            Path(filename).write_bytes(b"synthetic-session")
-            print("Saved session notice")
-
+    """Break caught: bootstrap diagnostics or JSON contaminate the secret pipe."""
     boundary = module()
     monkeypatch.setattr(
         boundary,
-        "bootstrap_session",
-        lambda username: bootstrap_session(username, loader_factory=lambda **_: Loader()),
+        "bootstrap_session_from_chrome",
+        lambda username: base64.b64encode(b"synthetic-session").decode(),
         raising=False,
     )
     assert boundary.main(["bootstrap-session", "--username", "archive_owner"]) == 0
     output = capsys.readouterr()
     assert output.out == base64.b64encode(b"synthetic-session").decode() + "\n"
-    assert "Interactive login and two-factor prompt" in output.err
-    assert "Checking authenticated identity" in output.err
-    assert "Saved session notice" in output.err
 
 
 @pytest.mark.parametrize(
@@ -275,7 +249,7 @@ def test_bootstrap_failure_has_empty_stdout_and_sanitized_stable_exit(
     def fail(username: str) -> str:
         raise failure("synthetic-sensitive-value")
 
-    monkeypatch.setattr(boundary, "bootstrap_session", fail, raising=False)
+    monkeypatch.setattr(boundary, "bootstrap_session_from_chrome", fail, raising=False)
     assert boundary.main(["bootstrap-session", "--username", "archive_owner"]) == expected
     output = capsys.readouterr()
     assert output.out == ""
@@ -289,37 +263,6 @@ def test_bootstrap_missing_username_does_not_emit_json_into_secret_pipe() -> Non
     assert result.returncode == 2
     assert result.stdout == ""
     assert "Invalid command arguments" in result.stderr
-
-
-def test_bootstrap_real_identity_probe_suppresses_upstream_errors_and_close_replay(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Break caught: test_login prints raw diagnostics and context.close replays them."""
-    from instaloader import Instaloader, InstaloaderContext
-    from instaloader.exceptions import ConnectionException
-
-    contexts = []
-
-    def interactive(loader, username):
-        assert username == "archive_owner"
-        print("Interactive credential prompt")
-
-    def network(context, *args, **kwargs):
-        contexts.append(context)
-        raise ConnectionException("SYNTHETIC-UPSTREAM-DETAIL")
-
-    monkeypatch.setattr(Instaloader, "interactive_login", interactive)
-    monkeypatch.setattr(InstaloaderContext, "graphql_query", network)
-    assert module().main(["bootstrap-session", "--username", "archive_owner"]) == 20
-    assert contexts, "real Instaloader test_login must reach its network boundary"
-    for context in contexts:
-        context.close()
-    output = capsys.readouterr()
-    assert output.out == ""
-    assert "Interactive credential prompt" in output.err
-    assert "Authentication failed" in output.err
-    assert "SYNTHETIC-UPSTREAM-DETAIL" not in output.err
-    assert all(context.error_log == [] for context in contexts)
 
 
 @pytest.mark.parametrize(
