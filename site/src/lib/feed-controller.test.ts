@@ -135,10 +135,11 @@ function pointer(target: HTMLElement, type: string, x: number, y = 10) {
     isPrimary: true,
   });
   target.dispatchEvent(event);
+  return event;
 }
-function setupCarousel(reduced = false) {
+function setupCarousel(reduced = false, post = carousel) {
   vi.stubGlobal("matchMedia", () => ({ matches: reduced }));
-  const mounted = setupFeed("", [carousel]);
+  const mounted = setupFeed("", [post]);
   const gallery = mounted.root.querySelector<HTMLElement>("[data-carousel]")!;
   const track = gallery.querySelector<HTMLElement>(".media-track")!;
   Object.defineProperty(track, "clientWidth", { value: 640 });
@@ -281,6 +282,89 @@ describe("feed controller", () => {
 });
 
 describe("carousel interactions", () => {
+  it.each([false, true])(
+    "swipes across the video surface in an all-video carousel=%s without toggling playback",
+    (allVideo) => {
+      const item = video.media[0];
+      const m = setupCarousel(false, {
+        ...carousel,
+        media: [
+          item,
+          allVideo ? { ...item, position: 1 } : carousel.media[1],
+          { ...item, position: 2 },
+        ],
+      });
+      const player = m.track.querySelector<HTMLVideoElement>("video")!;
+      player.getBoundingClientRect = () => ({
+        top: 0,
+        left: 0,
+        right: 640,
+        bottom: 480,
+        width: 640,
+        height: 480,
+        x: 0,
+        y: 0,
+        toJSON() {},
+      });
+      const capture = vi.fn();
+      m.gallery.setPointerCapture = capture;
+      const down = pointer(player, "pointerdown", 240, 100);
+      expect(capture).not.toHaveBeenCalled();
+      expect(down.defaultPrevented).toBe(false);
+      const move = pointer(player, "pointermove", 140, 100);
+      expect(capture).toHaveBeenCalledWith(1);
+      expect(move.defaultPrevented).toBe(true);
+      // Touch starts with implicit capture on video; transferring capture to
+      // the gallery releases that old target before the gesture finishes.
+      pointer(player, "lostpointercapture", 140, 100);
+      pointer(m.gallery, "pointerup", 140, 100);
+      expect(m.status.textContent).toBe("2 of 3");
+      const click = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        detail: 1,
+      });
+      player.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+    },
+  );
+  it("leaves video taps and native control-bar drags uncaptured and uncancelled", () => {
+    const m = setupCarousel(false, {
+      ...carousel,
+      media: [video.media[0], ...carousel.media.slice(1)],
+    });
+    const player = m.track.querySelector<HTMLVideoElement>("video")!;
+    player.getBoundingClientRect = () => ({
+      top: 0,
+      left: 0,
+      right: 640,
+      bottom: 480,
+      width: 640,
+      height: 480,
+      x: 0,
+      y: 0,
+      toJSON() {},
+    });
+    const capture = vi.fn();
+    m.gallery.setPointerCapture = capture;
+    const events = [
+      pointer(player, "pointerdown", 240, 100),
+      pointer(player, "pointerup", 241, 100),
+      pointer(player, "pointerdown", 240, 455),
+      pointer(player, "pointermove", 140, 455),
+      pointer(player, "pointerup", 140, 455),
+    ];
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    player.dispatchEvent(click);
+    expect(events.every((event) => !event.defaultPrevented)).toBe(true);
+    expect(click.defaultPrevented).toBe(false);
+    expect(capture).not.toHaveBeenCalled();
+    expect(m.status.textContent).toBe("1 of 3");
+  });
   it.each([false, true])(
     "scrolls the track, clamps endpoints and reports position with reduced motion=%s",
     (reduced) => {

@@ -22,6 +22,31 @@ const post = (
 });
 
 describe("feed state", () => {
+  it.each(["Σ", "σ", "ς"])(
+    "matches contextual sigma consistently for query %s",
+    (q) => {
+      const posts = [
+        post("CAPTION", { creator_username: "other", caption: "ΟΣ" }),
+        post("USERNAME", { creator_username: "ΟΣ", caption: "other" }),
+      ];
+      expect(
+        selectPosts(posts, { q, type: "all", sort: "archived" }).map(
+          (p) => p.shortcode,
+        ),
+      ).toEqual(["CAPTION", "USERNAME"]);
+    },
+  );
+  it("keeps punctuation literal while searching with Unicode case folding", () => {
+    const posts = [
+      post("A", { caption: "C++ [Σ] .*" }),
+      post("B", { caption: "other" }),
+    ];
+    expect(
+      selectPosts(posts, { q: "[σ] .*", type: "all", sort: "archived" }).map(
+        (p) => p.shortcode,
+      ),
+    ).toEqual(["A"]);
+  });
   it("omits defaults and falls back from invalid values", () => {
     expect(parseFeedState("?type=images&sort=oldest")).toEqual({
       q: "",

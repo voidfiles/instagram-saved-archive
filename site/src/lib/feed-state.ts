@@ -31,8 +31,10 @@ export function selectPosts(
   posts: ArchivePost[],
   state: FeedState,
 ): ArchivePost[] {
-  const fold = (text: string) => text.normalize("NFC").toLowerCase();
-  const query = fold(state.q.trim());
+  // Unicode-aware ignoreCase uses context-independent simple case folding,
+  // unlike lowercasing whole strings (which changes Greek final sigma).
+  const query = state.q.trim().normalize("NFC");
+  const search = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu");
   // Preserve Python's microsecond timestamps; Date.parse truncates to milliseconds.
   const timestampKey = (value: string) => {
     const [seconds, fraction = ""] = value.slice(0, -1).split(".");
@@ -43,8 +45,8 @@ export function selectPosts(
       (post) =>
         (state.type === "all" || post.media_type === state.type) &&
         (!query ||
-          fold(post.creator_username).includes(query) ||
-          fold(post.caption).includes(query)),
+          search.test(post.creator_username.normalize("NFC")) ||
+          search.test(post.caption.normalize("NFC"))),
     )
     .sort((a, b) => {
       const key = state.sort === "published" ? "published_at" : "archived_at";

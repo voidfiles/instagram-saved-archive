@@ -28,7 +28,16 @@ export function mountFeed(
   let limit = 12;
   let active = true;
   let gesture:
-    { gallery: HTMLElement; id: number; x: number; y: number } | undefined;
+    | {
+        gallery: HTMLElement;
+        id: number;
+        x: number;
+        y: number;
+        videoOrigin: boolean;
+        captured: boolean;
+      }
+    | undefined;
+  let suppressClickGallery: HTMLElement | undefined;
   const disposers: (() => void)[] = [];
   function listen(
     target: EventTarget,
@@ -194,6 +203,23 @@ export function mountFeed(
     if (gallery && button.matches("[data-carousel-prev], [data-carousel-next]"))
       navigate(gallery, button.hasAttribute("data-carousel-next") ? 1 : -1);
   });
+  listen(
+    root,
+    "click",
+    (event) => {
+      const gallery = suppressClickGallery;
+      suppressClickGallery = undefined;
+      if (
+        gallery &&
+        (event as MouseEvent).detail > 0 &&
+        gallery.contains(targetElement(event))
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    },
+    true,
+  );
   listen(root, "keydown", (event) => {
     const key = event as KeyboardEvent;
     if (key.key !== "ArrowLeft" && key.key !== "ArrowRight") return;
@@ -226,12 +252,15 @@ export function mountFeed(
     const released = gesture;
     gesture = undefined;
     try {
-      released.gallery.releasePointerCapture?.(released.id);
+      if (released.captured)
+        released.gallery.releasePointerCapture?.(released.id);
     } catch {
       /* Browser may already have released a cancelled pointer. */
     }
   }
   listen(root, "pointerdown", (event) => {
+    suppressClickGallery = undefined;
+    releaseGesture();
     const pointer = event as PointerEvent;
     const target = targetElement(event);
     const gallery = target?.closest<HTMLElement>("[data-carousel]");
@@ -239,29 +268,58 @@ export function mountFeed(
       !gallery ||
       pointer.button !== 0 ||
       pointer.isPrimary === false ||
-      target?.closest("button, a, video, input")
+      target?.closest("button, a, input")
     )
       return;
-    releaseGesture();
+    const video = target?.closest<HTMLVideoElement>("video");
+    if (video?.controls) {
+      const bounds = video.getBoundingClientRect();
+      // Native controls are retargeted to <video>; reserve their bottom strip
+      // so seeking/volume drags are not mistaken for carousel gestures.
+      if (bounds.height > 0 && pointer.clientY >= bounds.bottom - 64) return;
+    }
     gesture = {
       gallery,
       id: pointer.pointerId,
       x: pointer.clientX,
       y: pointer.clientY,
+      videoOrigin: !!video,
+      captured: !video,
     };
-    gallery.setPointerCapture?.(pointer.pointerId);
+    if (!video) gallery.setPointerCapture?.(pointer.pointerId);
+  });
+  listen(root, "pointermove", (event) => {
+    const pointer = event as PointerEvent;
+    if (!gesture?.videoOrigin || gesture.id !== pointer.pointerId) return;
+    const dx = pointer.clientX - gesture.x;
+    const dy = pointer.clientY - gesture.y;
+    if (Math.abs(dx) >= 50 && Math.abs(dx) > Math.abs(dy)) {
+      if (!gesture.captured) {
+        gesture.gallery.setPointerCapture?.(gesture.id);
+        gesture.captured = true;
+      }
+      event.preventDefault();
+    }
   });
   listen(root, "pointerup", (event) => {
     const pointer = event as PointerEvent;
     if (!gesture || gesture.id !== pointer.pointerId) return;
     const dx = pointer.clientX - gesture.x;
     const dy = pointer.clientY - gesture.y;
-    if (Math.abs(dx) >= 50 && Math.abs(dx) > Math.abs(dy))
+    if (Math.abs(dx) >= 50 && Math.abs(dx) > Math.abs(dy)) {
+      if (gesture.videoOrigin) {
+        event.preventDefault();
+        suppressClickGallery = gesture.gallery;
+      }
       navigate(gesture.gallery, dx < 0 ? 1 : -1);
+    }
     releaseGesture();
   });
   listen(root, "pointercancel", releaseGesture);
-  listen(root, "lostpointercapture", releaseGesture);
+  listen(root, "lostpointercapture", (event) => {
+    // Ignore loss of video's implicit capture when we transfer it to gallery.
+    if (event.target === gesture?.gallery) releaseGesture();
+  });
   syncControls();
   render();
   controls.hidden = false;
@@ -293,6 +351,7 @@ export function mountFeed(
     observer?.disconnect();
     disposers.forEach((dispose) => dispose());
     releaseGesture();
+    suppressClickGallery = undefined;
     controls.hidden = true;
     more.hidden = true;
     rows.forEach((row) => {
