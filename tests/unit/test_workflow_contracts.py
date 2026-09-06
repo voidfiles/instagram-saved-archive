@@ -18,6 +18,13 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "test.yml"
 PYPROJECT_PATH = REPOSITORY_ROOT / "pyproject.toml"
 REQUIRED_RUN_STEPS = {
+    "Install FFmpeg": (
+        None,
+        (
+            "sudo apt-get update",
+            "sudo apt-get install --yes ffmpeg",
+        ),
+    ),
     "Check FFmpeg": (None, ("ffmpeg -version",)),
     "Install Python dependencies": (
         None,
