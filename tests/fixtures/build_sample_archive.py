@@ -30,12 +30,14 @@ def build_sample_archive(output: Path) -> None:
         kinds = [["image"], ["video"], ["image", "video", "image"]][index % 3]
         media = []
         for position, kind in enumerate(kinds):
-            scene = Image.new("RGB", (640, 480), palette[index % len(palette)])
+            width, height = {0: (480, 640), 3: (320, 960)}.get(index, (640, 480))
+            preview_width, preview_height = width // 2, height // 2
+            scene = Image.new("RGB", (width, height), palette[index % len(palette)])
             drawing = ImageDraw.Draw(scene)
             drawing.ellipse((170, 80, 470, 380), fill=(246, 238, 221))
             drawing.text((24, 24), f"Saved / {index + 1:02d} / {position + 1}", fill=(38, 44, 42))
             preview_path = directory / f"{position}-preview.webp"
-            scene.resize((320, 240)).save(preview_path, "WEBP", quality=80)
+            scene.resize((preview_width, preview_height)).save(preview_path, "WEBP", quality=80)
             asset_path = directory / f"{position}.{'webp' if kind == 'image' else 'mp4'}"
             if kind == "image":
                 scene.save(asset_path, "WEBP", quality=85)
@@ -91,9 +93,9 @@ def build_sample_archive(output: Path) -> None:
                 "position": position,
                 "kind": kind,
                 "asset": asset(
-                    asset_path, 640, 480, "image/webp" if kind == "image" else "video/mp4"
+                    asset_path, width, height, "image/webp" if kind == "image" else "video/mp4"
                 ),
-                "preview": asset(preview_path, 320, 240, "image/webp"),
+                "preview": asset(preview_path, preview_width, preview_height, "image/webp"),
             }
             if kind == "video":
                 item["duration_seconds"] = 1.0

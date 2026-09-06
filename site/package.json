@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "check": "astro check",
-    "test": "vitest run",
+    "test": "vitest run src && node --test scripts/check-static-output.test.mjs",
     "test:e2e": "playwright test",
     "build": "astro build",
+    "preview": "astro preview",
+    "check:static": "node scripts/check-static-output.mjs",
     "format:check": "prettier --plugin=prettier-plugin-astro --check 'src/**/*.{ts,astro,css}' '*.{json,mjs,ts}'"
   },
   "dependencies": {

@@ -23,6 +23,7 @@ export function mountFeed(
     .forEach((row) => rows.set(row.dataset.shortcode!, row));
   const enhanced = new WeakSet<HTMLElement>();
   const positions = new WeakMap<HTMLElement, number>();
+  const navigating = new WeakSet<HTMLElement>();
   let state = parseFeedState(window.location.search);
   let selected = selectPosts(posts, state);
   let limit = 12;
@@ -68,6 +69,9 @@ export function mountFeed(
       gallery,
       (positions.get(gallery) ?? 0) + delta,
     );
+    // Preserve the requested destination while smooth scrolling crosses earlier slides.
+    if (Math.abs(track.scrollLeft - track.clientWidth * position) > 1)
+      navigating.add(gallery);
     track.scrollTo({
       left: track.clientWidth * position,
       behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
@@ -242,8 +246,34 @@ export function mountFeed(
     (event) => {
       const track = targetElement(event);
       const gallery = track?.closest<HTMLElement>("[data-carousel]");
-      if (track?.matches(".media-track") && gallery && track.clientWidth)
+      if (
+        track?.matches(".media-track") &&
+        gallery &&
+        Math.abs(
+          track.scrollLeft - track.clientWidth * (positions.get(gallery) ?? 0),
+        ) <= 1
+      )
+        navigating.delete(gallery);
+      if (
+        track?.matches(".media-track") &&
+        gallery &&
+        track.clientWidth &&
+        !navigating.has(gallery)
+      )
         setPosition(gallery, Math.round(track.scrollLeft / track.clientWidth));
+    },
+    true,
+  );
+  listen(
+    root,
+    "scrollend",
+    (event) => {
+      const track = targetElement(event);
+      const gallery = track?.closest<HTMLElement>("[data-carousel]");
+      if (track?.matches(".media-track") && gallery && track.clientWidth) {
+        navigating.delete(gallery);
+        setPosition(gallery, Math.round(track.scrollLeft / track.clientWidth));
+      }
     },
     true,
   );
