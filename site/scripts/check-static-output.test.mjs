@@ -102,3 +102,57 @@ test("rejects oversized metadata through the budget CLI before parsing it", asyn
   assert.notEqual(result.status, 0);
   assert.equal(result.report.budget?.level, "reject");
 });
+
+for (const [name, html, css] of [
+  [
+    "inline style element remote media",
+    "<style>.x{background:url(https://scontent.cdninstagram.com/p.webp)}</style>",
+  ],
+  [
+    "inline style attribute missing media",
+    '<div style="background:url(/archive/media/missing.webp)"></div>',
+  ],
+  [
+    "inline quoted import remote stylesheet",
+    '<style>@import "https://example.com/remote.css";</style>',
+  ],
+  [
+    "inline quoted import missing stylesheet",
+    "<style>@import '/_astro/missing.css';</style>",
+  ],
+  [
+    "standalone quoted import remote stylesheet",
+    '<link rel="stylesheet" href="/_astro/test.css">',
+    '@import "https://example.com/remote.css";',
+  ],
+  [
+    "standalone quoted import missing stylesheet",
+    '<link rel="stylesheet" href="/_astro/test.css">',
+    "@import 'missing.css' screen;",
+  ],
+])
+  test(`rejects CSS ${name}`, async (t) => {
+    const root = await fixture(t, html);
+    if (css) {
+      await mkdir(join(root, "_astro"));
+      await writeFile(join(root, "_astro/test.css"), css);
+    }
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.report.error, /reference|remote/i);
+  });
+
+test("accepts CSS local inline URLs and quoted imports relative to their stylesheet", async (t) => {
+  const root = await fixture(
+    t,
+    '<style>@import "/_astro/test.css"; .x{background:url("/archive/media/SAMPLE/0.webp")}</style><div style="background:url(/archive/media/SAMPLE/0.webp)"></div>',
+  );
+  await mkdir(join(root, "_astro"));
+  await writeFile(join(root, "_astro/test.css"), "@import 'other.css' screen;");
+  await writeFile(
+    join(root, "_astro/other.css"),
+    '.x{background:url("/archive/media/SAMPLE/0.webp")}',
+  );
+  const result = run(root);
+  assert.equal(result.status, 0, result.report.error);
+});

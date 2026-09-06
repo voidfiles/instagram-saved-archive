@@ -73,6 +73,17 @@ async function check() {
       else assets(child);
     }
   }
+  function cssReferences(css, base = "index.html") {
+    // Imports may use a bare quoted string rather than url(...).
+    const urls =
+      /\burl\(\s*(?:"([^"]*)"|'([^']*)'|([^\s'"()]+))\s*\)|@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+    for (const match of css.matchAll(urls))
+      reference(
+        match.slice(1).find((value) => value !== undefined),
+        base,
+        true,
+      );
+  }
   const dom = new JSDOM(await readFile(join(root, "index.html"), "utf8"));
   try {
     for (const node of dom.window.document.querySelectorAll(
@@ -94,6 +105,10 @@ async function check() {
     }
     const embedded = dom.window.document.getElementById("archive-data");
     if (embedded) assets(JSON.parse(embedded.textContent));
+    for (const node of dom.window.document.querySelectorAll("style"))
+      cssReferences(node.textContent);
+    for (const node of dom.window.document.querySelectorAll("[style]"))
+      cssReferences(node.getAttribute("style"));
   } finally {
     dom.window.close();
   }
@@ -103,9 +118,7 @@ async function check() {
     );
   for (const file of files) {
     if (!file.endsWith(".css")) continue;
-    const css = await readFile(join(root, file), "utf8");
-    for (const match of css.matchAll(/url\(\s*["']?([^"')\s]+)["']?\s*\)/gi))
-      reference(match[1], file, true);
+    cssReferences(await readFile(join(root, file), "utf8"), file);
   }
   // The Python command owns both thresholds; do not duplicate budget arithmetic here.
   function verifyBudget() {

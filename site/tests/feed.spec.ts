@@ -254,6 +254,37 @@ test("rapid navigation retains destination and status throughout smooth scroll",
   await settled(gallery, 2);
 });
 
+test("reduced motion navigates immediately and preserves subsequent destination and status", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const gallery = page.locator("[data-carousel]").first();
+  await gallery.scrollIntoViewIfNeeded();
+  // Capture offsets in the same browser task as each real controller click.
+  // Waiting with locator assertions would let an unwanted animation finish.
+  const samples = await gallery.evaluate((el) => {
+    const track = el.querySelector<HTMLElement>(".media-track")!;
+    const next = el.querySelector<HTMLButtonElement>("[data-carousel-next]")!;
+    const prev = el.querySelector<HTMLButtonElement>("[data-carousel-prev]")!;
+    return [next, next, prev].map((button) => {
+      button.click();
+      return {
+        position: track.scrollLeft / track.clientWidth,
+        status: el.querySelector("[data-carousel-status]")!.textContent,
+      };
+    });
+  });
+  expect(samples).toEqual([
+    { position: 1, status: "2 of 3" },
+    { position: 2, status: "3 of 3" },
+    { position: 1, status: "2 of 3" },
+  ]);
+  await settled(gallery, 1);
+  await gallery.getByRole("button", { name: "Next slide" }).focus();
+  await page.keyboard.press("ArrowRight");
+  await settled(gallery, 2);
+});
+
 async function touchSwipe(page: Page, target: Locator, controlBar = false) {
   await target.scrollIntoViewIfNeeded();
   const box = (await target.boundingBox())!;
