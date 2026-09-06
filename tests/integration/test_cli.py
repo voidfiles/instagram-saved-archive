@@ -8,7 +8,6 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from fakes import FakeInstagramClient, SyncHarness, public_image
