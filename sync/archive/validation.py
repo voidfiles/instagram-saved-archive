@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 
 
 def parse_utc(value: str) -> datetime:
@@ -80,7 +81,7 @@ def _validate_post(post: object, shortcodes: set[str], asset_paths: set[str]) ->
 
     positions: set[int] = set()
     for media in post.media:
-        _validate_media(media, positions, asset_paths)
+        _validate_media(media, positions, asset_paths, shortcode)
     if positions != set(range(len(post.media))):
         raise ValueError("media positions must be contiguous and zero-based")
     if (
@@ -95,7 +96,9 @@ def _validate_post(post: object, shortcodes: set[str], asset_paths: set[str]) ->
         raise ValueError("video posts must contain video media")
 
 
-def _validate_media(media: object, positions: set[int], asset_paths: set[str]) -> None:
+def _validate_media(
+    media: object, positions: set[int], asset_paths: set[str], shortcode: str
+) -> None:
     from . import models
 
     if not isinstance(media, models.MediaRecord):
@@ -106,8 +109,11 @@ def _validate_media(media: object, positions: set[int], asset_paths: set[str]) -
     positions.add(position)
     if not isinstance(media.kind, models.MediaKind):
         raise ValueError("media.kind is invalid")
-    _validate_asset(media.asset, asset_paths)
-    _validate_asset(media.preview, asset_paths)
+    _validate_asset(media.asset, asset_paths, shortcode)
+    _validate_asset(media.preview, asset_paths, shortcode)
+    expected_mime = "video/mp4" if media.kind is models.MediaKind.VIDEO else "image/webp"
+    if media.asset.mime_type != expected_mime:
+        raise ValueError("primary rendition MIME type must match its media kind")
     if media.preview.mime_type != "image/webp":
         raise ValueError("media previews must be WebP assets")
     if media.kind is models.MediaKind.VIDEO:
@@ -116,16 +122,21 @@ def _validate_media(media: object, positions: set[int], asset_paths: set[str]) -
         raise ValueError("image media cannot have a duration")
 
 
-def _validate_asset(asset: object, asset_paths: set[str]) -> None:
+def _validate_asset(asset: object, asset_paths: set[str], shortcode: str) -> None:
     from . import models
 
     if not isinstance(asset, models.AssetRecord):
         raise ValueError("media assets must be AssetRecord records")
     path = models._require_asset_path(asset.asset_path, "asset.asset_path")
+    if PurePosixPath(path).parts[1] != shortcode:
+        raise ValueError("asset path must be beneath its owning media/shortcode directory")
+    models._require_nonempty_string(asset.mime_type, "asset.mime_type")
+    extension = {"image/webp": ".webp", "video/mp4": ".mp4"}.get(asset.mime_type)
+    if extension is None or PurePosixPath(path).suffix != extension:
+        raise ValueError("asset extension must match its supported rendition MIME type")
     if path in asset_paths:
         raise ValueError(f"duplicate media path: {path}")
     asset_paths.add(path)
-    models._require_nonempty_string(asset.mime_type, "asset.mime_type")
     models._require_positive_int(asset.width, "asset.width")
     models._require_positive_int(asset.height, "asset.height")
     models._require_asset_byte_size(asset.byte_size, "asset.byte_size")

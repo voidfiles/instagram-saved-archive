@@ -1,8 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, rm, open } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  writeFile,
+  symlink,
+  rm,
+  open,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 async function fixture(t, html = '<img src="/archive/media/SAMPLE/0.webp">') {
@@ -206,4 +214,76 @@ test("accepts CSS local inline URLs and quoted imports relative to their stylesh
   );
   const result = run(root);
   assert.equal(result.status, 0, result.report.error);
+});
+
+async function productionBudgetProbe(t, level, override) {
+  const root = await fixture(t, "");
+  for (let i = 0; i < 10; i++)
+    await sparse(
+      join(root, `archive/media/SAMPLE/${i}.webp`),
+      level === "warning" ? 85_000_000 : 90_000_000,
+    );
+  const extracted = spawnSync(
+    process.env.PYTHON || "python",
+    [
+      "-c",
+      "import json, pathlib, sys, yaml; steps = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())['jobs']['sync-and-deploy']['steps']; print(json.dumps(next(step['run'] for step in steps if step['name'] == 'Check production static output')))",
+      resolve("../.github/workflows/sync-and-deploy.yml"),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(extracted.status, 0, extracted.stderr);
+  const script = override || JSON.parse(extracted.stdout);
+  const runner = await mkdtemp(join(tmpdir(), "production-budget-"));
+  t.after(() => rm(runner, { recursive: true, force: true }));
+  const bin = join(runner, "bin");
+  await mkdir(bin);
+  const npm = spawnSync("sh", ["-c", "command -v npm"], { encoding: "utf8" });
+  assert.equal(npm.status, 0, npm.stderr);
+  // Redirect only the artifact root; run the real npm entrypoint and static checker.
+  await writeFile(
+    join(bin, "npm"),
+    `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const result = spawnSync(${JSON.stringify(npm.stdout.trim())}, [...process.argv.slice(2), "--", "--root", ${JSON.stringify(root)}], { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+    { mode: 0o700 },
+  );
+  const summaryPath = join(runner, "summary");
+  const result = spawnSync(
+    "bash",
+    ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        ASTRO_BASE_PATH: "",
+        RUNNER_TEMP: runner,
+        GITHUB_STEP_SUMMARY: summaryPath,
+      },
+      timeout: 15_000,
+    },
+  );
+  assert.equal(result.status, level === "warning" ? 0 : 1, result.stderr);
+  const summary = await readFile(summaryPath, "utf8").catch(() => "");
+  assert.match(summary, new RegExp(`Artifact budget: ${level}`));
+  assert.ok(summary.includes(level === "warning" ? "850000000" : "900000000"));
+  assert.ok(summary.includes("archive/media/SAMPLE/0.webp"));
+  assert.ok(
+    !`${result.stdout}${result.stderr}`.includes("archive/media/SAMPLE"),
+  );
+}
+
+for (const level of ["warning", "reject"])
+  test(`production workflow summarizes real checker ${level} without logging contributors`, async (t) => {
+    await productionBudgetProbe(t, level);
+  });
+
+test("production probe detects the original logging-only checker invocation", async (t) => {
+  await assert.rejects(
+    productionBudgetProbe(t, "warning", "npm run check:static"),
+    { code: "ERR_ASSERTION" },
+  );
 });

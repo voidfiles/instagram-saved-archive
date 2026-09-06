@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import pickle
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -20,12 +21,14 @@ from instaloader.exceptions import (
     QueryReturnedNotFoundException,
     TooManyRequestsException,
 )
+from requests import PreparedRequest, Response, Session
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from urllib3.connectionpool import HTTPConnectionPool
 from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from sync.instagram.client import InstaloaderClient
 from sync.instagram.errors import (
+    AuthenticationError,
     ChallengeError,
     CheckpointError,
     LoginError,
@@ -33,6 +36,7 @@ from sync.instagram.errors import (
     TransientTransportError,
 )
 from sync.instagram.models import MediaKind, SavedCandidate, SourceMedia, VerificationStatus
+from sync.instagram.retry import RetryPolicy, retry_transport
 
 
 def _real_client(tmp_path: Path) -> tuple[InstaloaderClient, Instaloader]:
@@ -386,6 +390,56 @@ def test_real_identity_probe_preserves_failure_category(
 
     assert "secret" not in str(captured.value)
     assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "message", "expected_type"),
+    [
+        (401, "Unauthorized", "Please log in", LoginError),
+        (200, "OK", "login_required", LoginError),
+        (400, "Bad Request", "challenge_required", ChallengeError),
+    ],
+)
+def test_real_json_identity_auth_response_is_terminal_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status: int,
+    reason: str,
+    message: str,
+    expected_type: type[AuthenticationError],
+) -> None:
+    """Break caught: real get_json wrappers turn expired authentication into repeated requests."""
+    client, loader = _real_client(tmp_path)
+    response = Response()
+    response.status_code = status
+    response.reason = reason
+    response.url = "https://www.instagram.com/graphql/query?session=secret-value"
+    response.headers["Content-Type"] = "application/json"
+    response._content = json.dumps({"status": "fail", "message": message}).encode()
+    requests: list[str] = []
+    sleeps: list[float] = []
+
+    def send(_session: Session, request: PreparedRequest, **_options: object) -> Response:
+        requests.append(str(request.url))
+        return response
+
+    monkeypatch.setattr(Session, "send", send)
+    monkeypatch.setattr(loader.context, "do_sleep", lambda: None)
+    monkeypatch.setattr(loader.context._rate_controller, "wait_before_query", lambda _query: None)
+
+    with pytest.raises(expected_type) as captured:
+        retry_transport(
+            lambda: client.validate_identity("archive_owner"), RetryPolicy(), sleep=sleeps.append
+        )
+
+    assert captured.value.exit_code == 20
+    assert captured.value.__cause__ is None
+    assert len(requests) == 1
+    assert sleeps == []
+    output = capsys.readouterr()
+    assert output.out == output.err == ""
+    assert "secret" not in str(captured.value)
 
 
 def test_iter_saved_is_lazy_and_candidates_do_not_print_their_token(tmp_path: Path) -> None:

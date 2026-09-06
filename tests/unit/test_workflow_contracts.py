@@ -327,7 +327,6 @@ def _assert_deployment_contract(workflow: Mapping[object, object]) -> None:
             'python -m sync.cli prepare-site-input --snapshot "$SNAPSHOT" --destination site/public/archive',
         ),
         "Build production site": ("site", "npm run build"),
-        "Check production static output": ("site", "npm run check:static"),
     }
     for name, (directory, command) in commands.items():
         step = _step_by_name(steps, name)
@@ -345,6 +344,7 @@ def _assert_deployment_contract(workflow: Mapping[object, object]) -> None:
     assert _step_by_name(steps, "Configure Pages").get("id") == "pages"
     production_build = _step_by_name(steps, "Build production site")
     production_check = _step_by_name(steps, "Check production static output")
+    assert production_check.get("working-directory") == "site"
     for step in (production_build, production_check):
         assert step.get("env") == {"ASTRO_BASE_PATH": "${{ steps.pages.outputs.base_path }}"}
     restore = _step_by_name(steps, "Restore archive snapshot")
@@ -361,20 +361,20 @@ def _assert_deployment_contract(workflow: Mapping[object, object]) -> None:
     }
     assert "working-directory" not in sync
     publish_lines = str(publish.get("run")).splitlines()
-    assert publish_lines == [
-        "set -euo pipefail",
+    for line in [
         'remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"',
         'python -m sync.cli publish-snapshot --snapshot "$SNAPSHOT" \\',
         '  --source-repository "$GITHUB_WORKSPACE" \\',
-        '  --expected-repository "$GITHUB_REPOSITORY" --remote-url "$remote"',
-    ]
+        '  --expected-repository "$GITHUB_REPOSITORY" --remote-url "$remote" \\',
+    ]:
+        assert line in publish_lines
     for step in steps:
         run = str(step.get("run", ""))
         assert "${{" not in run, "untrusted expressions must enter shell scripts through env"
         assert not any(text in run.lower() for text in ("set -x", "printenv", "password"))
         if step not in (restore, publish, sync, production_build, production_check):
             assert "env" not in step
-        if step != sync:
+        if step not in (sync, production_check, publish):
             assert "GITHUB_STEP_SUMMARY" not in run
     restore_run = str(restore.get("run"))
     assert "refs/heads/archive-data" in restore_run
@@ -472,12 +472,14 @@ def _run_deployment_shell(
     name: str,
     extra_env: dict[str, str],
     fake: str,
+    *,
+    run_override: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the actual workflow shell with only external commands replaced offline."""
     step = _step_by_name(_deployment_steps(_deployment()), name)
     bin_path = tmp_path / "bin"
     bin_path.mkdir()
-    for command in ("python", "git"):
+    for command in ("python", "git", "npm"):
         executable = bin_path / command
         executable.write_text(f"#!{sys.executable}\n" + fake, encoding="utf-8")
         executable.chmod(0o700)
@@ -495,8 +497,17 @@ def _run_deployment_shell(
         **extra_env,
     }
     return subprocess.run(
-        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", str(step["run"])],
-        cwd=REPOSITORY_ROOT,
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            run_override if run_override is not None else str(step["run"]),
+        ],
+        cwd=REPOSITORY_ROOT / str(step.get("working-directory", ".")),
         env=environment,
         capture_output=True,
         text=True,
@@ -664,3 +675,129 @@ sys.exit(boundary.main(sys.argv[3:]))
     assert "synthetic-session" not in summary
     if not identity_matches:
         assert "Authentication failed" in summary
+
+
+def _budget_shell_probe(tmp_path: Path, scope: str, level: str, mutation: str = "") -> None:
+    """Exercise Python boundaries before npm installation; site tests cover the real checker."""
+    name = "Synchronize Instagram" if scope == "Snapshot" else "Check production static output"
+    fake = """import os, subprocess, sys
+from pathlib import Path
+root = Path(os.environ["RUNNER_TEMP"])
+if sys.argv[1:4] == ["-m", "sync.cli", "sync"]:
+    sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
+    import sync.cli as boundary
+    import sync.engine as engine
+    from sync.archive.budget import check_budget, PathSize
+    from tests.integration.fakes import FakeInstagramClient, SyncHarness, public_image
+    harness = SyncHarness(root)
+    snapshot = Path(os.environ["SNAPSHOT"])
+    harness.snapshot.rename(snapshot)
+    client = FakeInstagramClient()
+    client.saved = [public_image("PUBLIC"), *[public_image(f"PUBLIC{i}") for i in range(4)]]
+    boundary.InstaloaderClient = lambda _session: client
+    total = 850_000_000 if os.environ["BUDGET_LEVEL"] == "warning" else 900_000_000
+    engine.check_budget = lambda _root: check_budget(_root, size_walker=lambda _: (
+        PathSize(path.relative_to(_root), total // 10)
+        for path in sorted((_root / "media").rglob("*.webp"))
+    ))
+    sys.exit(boundary.main(sys.argv[3:]))
+if sys.argv[1:3] == ["run", "check:static"]:
+    artifact = root / "artifact"
+    media = artifact / "archive/media/PUBLIC"
+    media.mkdir(parents=True)
+    (artifact / "index.html").write_text("")
+    size = 85_000_000 if os.environ["BUDGET_LEVEL"] == "warning" else 90_000_000
+    for i in range(10):
+        with (media / f"{i:02}.webp").open("wb") as file:
+            file.truncate(size)
+    result = subprocess.run([sys.executable, "-m", "sync.cli", "check-budget",
+                             "--root", str(artifact)], capture_output=True, text=True)
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    sys.exit(0 if result.returncode == 0 else 1)
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+"""
+    step = _step_by_name(_deployment_steps(_deployment()), name)
+    run = str(step["run"])
+    if mutation == "discard_summary":
+        run = 'export GITHUB_STEP_SUMMARY="$RUNNER_TEMP/discarded-summary"\n' + run
+    elif mutation == "swallow_refusal":
+        run = "(\n" + run + "\n) || true"
+    result = _run_deployment_shell(
+        tmp_path,
+        name,
+        {
+            "INSTAGRAM_USERNAME": "synthetic_user",
+            "INSTAGRAM_SESSION_B64": base64.b64encode(b"synthetic-session").decode(),
+            "MAX_NEW_POSTS": "5",
+            "FULL_SCAN": "false",
+            "BUDGET_LEVEL": level,
+            "PYTHON": sys.executable,
+        },
+        fake,
+        run_override=run,
+    )
+    expected_exit = 0 if level == "warning" else 31 if scope == "Snapshot" else 1
+    assert result.returncode == expected_exit, result.stderr
+    summary_path = tmp_path / "summary"
+    assert summary_path.is_file(), "budget diagnostics never reached Actions summary"
+    summary = summary_path.read_text()
+    assert f"{scope} budget: {level}" in summary
+    assert ("850000000" if level == "warning" else "900000000") in summary
+    assert "media/PUBLIC/00.webp" in summary
+    assert "Largest contributors" in summary
+    assert "media/PUBLIC" not in result.stdout + result.stderr
+    assert "synthetic-session" not in summary + result.stdout + result.stderr
+    assert "c3ludGhldGlj" not in summary + result.stdout + result.stderr
+    assert not (tmp_path / "runner/instagram.session").exists()
+
+
+@pytest.mark.parametrize("scope", ["Snapshot", "Artifact"])
+@pytest.mark.parametrize("level", ["warning", "reject"])
+def test_production_budget_diagnostics_reach_summary_without_logging_paths(
+    tmp_path: Path, scope: str, level: str
+) -> None:
+    """Break caught: production shell loses structured budget warnings/refusals or logs paths."""
+    _budget_shell_probe(tmp_path, scope, level)
+
+
+@pytest.mark.parametrize("scope", ["Snapshot", "Artifact"])
+@pytest.mark.parametrize("mutation", ["discard_summary", "swallow_refusal"])
+def test_budget_shell_probe_detects_summary_and_refusal_mutations(
+    tmp_path: Path, scope: str, mutation: str
+) -> None:
+    with pytest.raises(AssertionError):
+        _budget_shell_probe(tmp_path, scope, "reject", mutation)
+
+
+def test_publication_budget_refusal_reaches_summary_without_logging_private_paths(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a final publisher budget refusal logs raw contributor paths after sync."""
+    fake = """import os, sys
+from pathlib import Path
+if sys.argv[1:4] != ["-m", "sync.cli", "publish-snapshot"]:
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+from functools import partial
+import sync.cli as boundary
+from sync.archive.publisher import publish_snapshot
+from sync.archive.models import MAX_GENERATED_FILE_BYTES
+from sync.archive.store import SnapshotStore
+snapshot = Path(os.environ["SNAPSHOT"])
+SnapshotStore(snapshot).initialize()
+with (snapshot / "private_owner-PRIVATE_CODE.bin").open("wb") as file:
+    file.truncate(MAX_GENERATED_FILE_BYTES + 1)
+def forbidden_git(*args, **kwargs):
+    raise AssertionError("Budget refusal must precede Git")
+boundary.publish_snapshot = partial(publish_snapshot, run=forbidden_git)
+sys.exit(boundary.main(sys.argv[3:]))
+"""
+    result = _run_deployment_shell(tmp_path, "Publish archive snapshot", {}, fake)
+    assert result.returncode == 31
+    summary_path = tmp_path / "summary"
+    assert summary_path.is_file(), "publisher budget refusal never reached Actions summary"
+    summary = summary_path.read_text()
+    assert "Snapshot budget: reject" in summary
+    assert "99614721 bytes" in summary
+    for private in ("private_owner", "PRIVATE_CODE", "synthetic-github-token"):
+        assert private not in summary + result.stdout + result.stderr

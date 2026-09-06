@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from instaloader import exceptions as instaloader_errors
 from requests.exceptions import RequestException
 from urllib3.exceptions import HTTPError
+
+if TYPE_CHECKING:
+    from sync.archive.budget import BudgetStatus
 
 
 class ArchiveError(Exception):
@@ -45,6 +48,10 @@ class ValidationError(ArchiveError):
 
 class SizeError(ArchiveError):
     exit_code = 31
+
+    def __init__(self, message: str = "", *, budget: BudgetStatus | None = None) -> None:
+        super().__init__(message)
+        self.budget = budget
 
 
 class PublicationError(ArchiveError):
@@ -103,6 +110,13 @@ def translate_instaloader_error(error: Exception) -> Exception | None:
                 instaloader_errors.LoginRequiredException,
                 instaloader_errors.PrivateProfileNotFollowedException,
             ),
+        )
+        for item in chain
+    ) or any(
+        isinstance(item, instaloader_errors.ConnectionException)
+        and (
+            str(item).startswith("401 ")
+            or 'status, message "login_required"' in str(item).split(" when accessing ", 1)[0]
         )
         for item in chain
     ):

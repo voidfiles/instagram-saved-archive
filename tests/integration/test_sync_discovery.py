@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from sync.archive.store import SnapshotStore
 from sync.instagram.errors import UnavailablePostError
-from sync.instagram.models import SavedCandidate
+from sync.instagram.models import PublicPost, SavedCandidate
 from tests.integration.fakes import NOW, SyncHarness, public_image
 
 
@@ -88,6 +89,33 @@ def test_duplicate_candidates_and_repeated_runs_do_not_redownload(tmp_path: Path
     report = harness.run()
     assert report.new_count == 0
     assert report.known_count == 3
+    assert harness.client.downloads == 1
+    assert harness.snapshot_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("caption", "expected"),
+    [
+        ("  Cafe\u0301 👩‍👩‍👧 #tag  ", "  Café 👩‍👩‍👧 #tag  "),
+        ("First\r\n\r\nSecond\rThird\n", "First\n\nSecond\nThird\n"),
+    ],
+)
+def test_ingestion_normalizes_caption_and_repeat_sync_stays_duplicate_free(
+    tmp_path: Path, caption: str, expected: str
+) -> None:
+    """Break caught: raw caption normalization fails final validation after ingestion."""
+    harness = SyncHarness(tmp_path)
+    post = public_image("CAPTION").token
+    assert isinstance(post, PublicPost)
+    harness.client.saved = [SavedCandidate(replace(post, caption=caption))] * 2
+
+    assert harness.run().new_count == 1
+    before = harness.snapshot_bytes()
+    posts = SnapshotStore(harness.snapshot).load()[0].posts
+    assert len(posts) == 1
+    assert posts[0].caption == expected
+    report = harness.run()
+    assert (report.new_count, report.known_count) == (0, 2)
     assert harness.client.downloads == 1
     assert harness.snapshot_bytes() == before
 

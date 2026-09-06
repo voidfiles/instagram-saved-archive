@@ -75,9 +75,12 @@ def test_rejected_budget_aborts_without_publication(
     harness.seed(1)
     before = harness.snapshot_bytes()
     monkeypatch.setattr("sync.archive.budget.REJECT_BYTES", 1)
-    with pytest.raises(SizeError):
+    with pytest.raises(SizeError) as captured:
         harness.run()
     assert harness.snapshot_bytes() == before
+    assert captured.value.budget.level == "reject"
+    assert captured.value.budget.total_bytes > 0
+    assert captured.value.budget.largest
 
 
 @pytest.mark.parametrize("status", list(VerificationStatus))

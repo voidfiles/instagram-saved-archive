@@ -19,7 +19,7 @@ from sync.archive.store import SnapshotStore
 from sync.bootstrap_session import bootstrap_session
 from sync.engine import SyncEngine, SyncOptions, recover_snapshot
 from sync.instagram.client import InstaloaderClient
-from sync.instagram.errors import ArchiveError, AuthenticationError, ValidationError
+from sync.instagram.errors import ArchiveError, AuthenticationError, SizeError, ValidationError
 from sync.instagram.retry import RetryPolicy, retry_transport
 from sync.reporting import render_job_summary
 from sync.site_input.exporter import export_site_input, resolve_plain_path, validate_snapshot
@@ -147,7 +147,11 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
         report = retry_transport(
             lambda: engine.run(snapshot, removals, datetime.now(UTC), options), policy
         )
-        result["report"] = asdict(report)
+        report_json = asdict(report)
+        report_json.pop("snapshot_budget")
+        result["report"] = report_json
+        if report.snapshot_budget is not None:
+            result["budget"] = _budget_json(report.snapshot_budget)
         diagnostic = render_job_summary(report)
     result["exit_code"] = code
     return result, diagnostic, code
@@ -178,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         code = failure.exit_code
         result = {"status": "error", "exit_code": code}
         diagnostic = render_job_summary(None, failure)
+        if isinstance(failure, SizeError) and failure.budget is not None:
+            result["budget"] = _budget_json(failure.budget)
     except (OSError, ValueError):
         code = 30
         result = {"status": "error", "exit_code": code}

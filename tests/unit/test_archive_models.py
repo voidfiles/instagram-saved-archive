@@ -293,6 +293,72 @@ def test_load_manifest_rejects_unknown_nested_keys(valid_manifest_dict: dict[str
         models.load_manifest(invalid_manifest)
 
 
+@pytest.mark.parametrize("rendition", ["asset", "preview"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".git/config",
+        "instagram.session",
+        "media/OTHER/00.webp",
+        "./media/IMAGE0001/00.webp",
+        "media/IMAGE0001/./00.webp",
+        "media//IMAGE0001/00.webp",
+        "media/IMAGE0001/00.webp/",
+        "media/IMAGE0001/.git/config.webp",
+        "media/IMAGE0001/secret\n.webp",
+        "media/IMAGE0001/00.mp4",
+        "media/IMAGE0001/00.WEBP",
+    ],
+)
+def test_asset_namespace_and_extension_are_enforced_for_loaded_and_typed_records(
+    valid_manifest_dict: dict[str, Any], path: str, rendition: str
+) -> None:
+    """Break caught: a referenced rendition can escape its canonical owner/media namespace."""
+    models = importlib.import_module("sync.archive.models")
+    valid = models.load_manifest(valid_manifest_dict)
+    valid_manifest_dict["posts"][0]["media"][0][rendition]["asset_path"] = path
+    with pytest.raises(ValueError):
+        models.load_manifest(valid_manifest_dict)
+    post = valid.posts[1]
+    media = post.media[0]
+    asset = replace(getattr(media, rendition), asset_path=path)
+    invalid = replace(
+        valid, posts=(valid.posts[0], replace(post, media=(replace(media, **{rendition: asset}),)))
+    )
+    with pytest.raises(ValueError):
+        models.dump_manifest(invalid)
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_primary_rendition_mime_and_extension_must_match_media_kind(
+    valid_manifest_dict: dict[str, Any], kind: str
+) -> None:
+    """Break caught: matching extension/MIME alone permits a video rendition on image media."""
+    media = valid_manifest_dict["posts"][1]["media"][1 if kind == "video" else 0]
+    media["asset"]["mime_type"] = "image/webp" if kind == "video" else "video/mp4"
+    media["asset"]["asset_path"] = (
+        "media/CAROUSEL1/wrong.webp" if kind == "video" else "media/CAROUSEL1/wrong.mp4"
+    )
+    with pytest.raises(ValueError):
+        importlib.import_module("sync.archive.models").load_manifest(valid_manifest_dict)
+
+
+@pytest.mark.parametrize("mime_type", [[], {}])
+def test_typed_rendition_rejects_non_string_mime_before_extension_lookup(
+    valid_manifest_dict: dict[str, Any], mime_type: object
+) -> None:
+    """Break caught: rendition lookup bypasses MIME validation with an unhashable value."""
+    models = importlib.import_module("sync.archive.models")
+    manifest = models.load_manifest(valid_manifest_dict)
+    post = manifest.posts[1]
+    media = post.media[0]
+    invalid = replace(media, asset=replace(media.asset, mime_type=mime_type))
+    with pytest.raises(ValueError, match="mime_type"):
+        models.dump_manifest(
+            replace(manifest, posts=(manifest.posts[0], replace(post, media=(invalid,))))
+        )
+
+
 def test_sync_state_round_trip_is_strict() -> None:
     """Break caught: sync-state conversion accepts unknown keys or changes stored values."""
     models = importlib.import_module("sync.archive.models")

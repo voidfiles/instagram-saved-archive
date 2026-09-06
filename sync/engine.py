@@ -18,6 +18,7 @@ from sync.archive.models import (
     MediaType,
     PublicationState,
     SyncState,
+    _normalize_caption,
 )
 from sync.archive.removals import apply_removals, parse_removals
 from sync.archive.store import SnapshotStore
@@ -111,13 +112,14 @@ class SyncEngine:
             store.validate_files(persisted)
             budget = check_budget(stage)
             if budget.level == "reject":
-                raise SizeError("snapshot exceeds publication size budget")
+                raise SizeError("snapshot exceeds publication size budget", budget=budget)
             _fsync_tree(stage)
             _install_snapshot(stage, snapshot, backup)
             return replace(
                 report,
                 automatic_removal_count=automatic_count,
                 snapshot_bytes=state.archive_byte_size,
+                snapshot_budget=budget,
             )
         finally:
             # A published transaction owns cleanup, including resumable partial deletion.
@@ -207,7 +209,7 @@ class SyncEngine:
             creator_username=post.creator_username,
             creator_id=post.creator_id,
             source_url=post.source_url,
-            caption=post.caption,
+            caption=_normalize_caption(post.caption, "post.caption"),
             published_at=post.published_at,
             archived_at=now,
             verified_at=now,

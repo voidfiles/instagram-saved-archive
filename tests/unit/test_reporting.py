@@ -74,3 +74,42 @@ def test_summary_warns_at_snapshot_budget_boundary(snapshot_bytes: int, warns: b
     if warns:
         assert "size" in summary.lower()
         assert "budget" in summary.lower()
+
+
+@pytest.mark.parametrize("scope", ["Snapshot", "Artifact"])
+def test_budget_summary_lists_only_safe_contributors_and_redacts_registered_secrets(
+    scope: str,
+) -> None:
+    """Break caught: raw budget/error JSON reveals unrelated private paths or Markdown injection."""
+    from sync import reporting
+
+    prefix = "archive/" if scope == "Artifact" else ""
+    budget = {
+        "level": "reject",
+        "total_bytes": 900_000_000,
+        "largest": [
+            {"path": prefix + "media/PUBLIC/00.webp", "size_bytes": 95_000_000},
+            {"path": prefix + "media/PUBLIC/synthetic-secret.webp", "size_bytes": 94_000_000},
+            {"path": "private_owner/PRIVATE_CODE.txt", "size_bytes": 93_000_000},
+            {"path": prefix + "media/PUBLIC/<img src=x>.webp", "size_bytes": 92_000_000},
+            {"path": "instagram.session", "size_bytes": 91_000_000},
+        ],
+        "error": "unregistered secret body",
+    }
+    summary = reporting.SecretRedactor(["synthetic-secret"]).redact(
+        reporting.render_budget_summary(budget, scope)
+    )
+    assert f"{scope} budget: reject" in summary
+    assert "900000000" in summary
+    assert prefix + "media/PUBLIC/00.webp" in summary
+    assert "95000000" in summary
+    assert "[REDACTED]" in summary
+    for private in (
+        "private_owner",
+        "PRIVATE_CODE",
+        "<img",
+        "instagram.session",
+        "synthetic-secret",
+        "unregistered secret body",
+    ):
+        assert private not in summary

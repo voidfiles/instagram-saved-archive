@@ -182,14 +182,48 @@ def test_git_environment_cannot_redirect_mutation_into_main(
     assert harness.git(["status", "--porcelain"], harness.source) == ""
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".git/config",
+        "instagram.session",
+        "media/OTHER/00.webp",
+        "./media/OLD000/00.webp",
+        "media/OLD000/00.mp4",
+    ],
+)
+def test_referenced_unsafe_asset_refuses_before_any_git_command(
+    harness: GitHarness, snapshot: Path, path: str
+) -> None:
+    """Break caught: referenced control paths reach export and Git initialization."""
+    document = snapshot / "manifest.json"
+    data = json.loads(document.read_text())
+    asset = data["posts"][0]["media"][0]["asset"]
+    original = snapshot / asset["asset_path"]
+    target = snapshot / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target != original:
+        original.rename(target)
+    asset["asset_path"] = path
+    document.write_text(json.dumps(data))
+
+    with pytest.raises(ValidationError):
+        publish(harness, snapshot)
+
+    assert harness.commands == []
+    assert harness.git(["for-each-ref", "--format=%(refname)"], harness.remote) == "refs/heads/main"
+
+
 def test_oversized_snapshot_refuses_before_git_mutation(
     harness: GitHarness, snapshot: Path
 ) -> None:
     with (snapshot / "oversized.bin").open("wb") as handle:
         handle.truncate(MAX_GENERATED_FILE_BYTES + 1)
-    with pytest.raises(SizeError):
+    with pytest.raises(SizeError) as captured:
         publish(harness, snapshot)
     assert not harness.commands
+    assert captured.value.budget.level == "reject"
+    assert captured.value.budget.largest[0].size_bytes == MAX_GENERATED_FILE_BYTES + 1
 
 
 def test_snapshot_inside_worktree_cannot_hide_behind_source_subdirectory(

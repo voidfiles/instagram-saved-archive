@@ -54,8 +54,9 @@ def publish_snapshot(
         if not source_repository.is_dir() or snapshot.is_relative_to(source_repository):
             raise PublicationError("snapshot must be outside the source worktree")
         validate_snapshot(snapshot)
-        if check_budget(snapshot).level == "reject":
-            raise SizeError("snapshot exceeds publication size budget")
+        budget = check_budget(snapshot)
+        if budget.level == "reject":
+            raise SizeError("snapshot exceeds publication size budget", budget=budget)
     except (OSError, ValueError):
         raise ValidationError("snapshot paths or content are invalid") from None
 
@@ -94,8 +95,9 @@ def publish_snapshot(
         repository = Path(temporary) / "snapshot"
         try:
             export_site_input(snapshot, repository)
-            if check_budget(repository).level == "reject":
-                raise SizeError("snapshot exceeds publication size budget")
+            budget = check_budget(repository)
+            if budget.level == "reject":
+                raise SizeError("snapshot exceeds publication size budget", budget=budget)
         except (OSError, ValueError):
             raise ValidationError("snapshot export failed validation") from None
         git(["init", "--template=", "-b", "archive-data"], repository)

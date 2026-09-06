@@ -438,8 +438,15 @@ def _require_asset_path(value: object, context: str) -> str:
     if "\\" in path:
         raise ValueError(f"{context} must use POSIX separators")
     parsed = PurePosixPath(path)
-    if parsed.is_absolute() or any(part in {"", ".", ".."} for part in parsed.parts):
-        raise ValueError(f"{context} must stay inside the snapshot root")
+    if (
+        parsed.is_absolute()
+        or parsed.as_posix() != path
+        or len(parsed.parts) < 3
+        or parsed.parts[0] != "media"
+        or any(part.startswith(".") for part in parsed.parts)
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
+        raise ValueError(f"{context} must be a canonical path beneath media without control paths")
     return path
 
 

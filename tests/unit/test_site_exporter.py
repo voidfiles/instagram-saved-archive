@@ -125,3 +125,37 @@ def test_failed_export_install_and_restore_preserves_previous_copy(
     survivors = list(snapshot.parent.glob(".site.old-*/keep"))
     assert len(survivors) == 1
     assert survivors[0].read_text() == "previous publication"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".git/config",
+        "instagram.session",
+        "media/OTHER/00.webp",
+        "./media/IMAGE0001/00.webp",
+        "media/IMAGE0001/00.mp4",
+    ],
+)
+def test_referenced_unsafe_asset_is_rejected_before_export_copy(snapshot: Path, path: str) -> None:
+    """Break caught: an attacker-controlled manifest copies Git config or session bytes."""
+    document = snapshot / "manifest.json"
+    data = json.loads(document.read_text())
+    asset = data["posts"][0]["media"][0]["asset"]
+    original = snapshot / asset["asset_path"]
+    target = snapshot / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target != original:
+        original.rename(target)
+    asset["asset_path"] = path
+    document.write_text(json.dumps(data))
+    destination = snapshot.parent / "site"
+    destination.mkdir()
+    (destination / "keep").write_bytes(b"previous export")
+
+    with pytest.raises(ValueError):
+        exporter()(snapshot, destination)
+
+    assert [(item.name, item.read_bytes()) for item in destination.iterdir()] == [
+        ("keep", b"previous export")
+    ]
