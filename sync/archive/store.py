@@ -310,10 +310,18 @@ def _load_transaction(path: Path) -> _MetadataTransaction:
     if data["version"] != 1 or data["phase"] not in {"prepared", "committed"}:
         raise ValueError("snapshot transaction journal has an invalid version or phase")
     temporary_files = data["temporary_files"]
+    expected_prefixes = (f".{MANIFEST_FILENAME}.", f".{SYNC_STATE_FILENAME}.")
     if (
         not isinstance(temporary_files, list)
         or len(temporary_files) != 2
-        or any(not isinstance(item, str) or Path(item).name != item for item in temporary_files)
+        or any(
+            not isinstance(item, str)
+            or "/" in item
+            or "\\" in item
+            or not item.startswith(prefix)
+            or len(item) == len(prefix)
+            for item, prefix in zip(temporary_files, expected_prefixes, strict=True)
+        )
     ):
         raise ValueError("snapshot transaction journal has invalid temporary file names")
     phase: Literal["prepared", "committed"] = data["phase"]

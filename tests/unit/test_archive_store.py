@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -221,6 +222,30 @@ def test_fresh_store_recovers_a_terminated_write_after_manifest_replacement(
         "sync-state.json",
         "media",
     }
+
+
+def test_recovery_rejects_final_metadata_names_in_a_corrupt_journal(tmp_path: Path) -> None:
+    """Break caught: corrupt journal cleanup can delete final metadata files."""
+    store = SnapshotStore(tmp_path / "snapshot")
+    store.initialize()
+    manifest_bytes = (store.root / "manifest.json").read_bytes()
+    state_bytes = (store.root / "sync-state.json").read_bytes()
+    journal = {
+        "phase": "prepared",
+        "old_manifest": base64.b64encode(manifest_bytes).decode("ascii"),
+        "old_state": base64.b64encode(state_bytes).decode("ascii"),
+        "new_manifest": base64.b64encode(manifest_bytes).decode("ascii"),
+        "new_state": base64.b64encode(state_bytes).decode("ascii"),
+        "temporary_files": ["manifest.json", "sync-state.json"],
+        "version": 1,
+    }
+    (store.root / ".metadata-transaction.json").write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="temporary file names"):
+        SnapshotStore(store.root).load()
+
+    assert (store.root / "manifest.json").read_bytes() == manifest_bytes
+    assert (store.root / "sync-state.json").read_bytes() == state_bytes
 
 
 def test_validate_files_accepts_recorded_files_and_reports_snapshot_size(tmp_path: Path) -> None:
