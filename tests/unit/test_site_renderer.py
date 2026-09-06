@@ -247,3 +247,32 @@ def test_render_failure_preserves_existing_destination(
 
     assert sentinel.read_text(encoding="utf-8") == "previous publication"
     assert sorted(item.name for item in destination.iterdir()) == ["keep.txt"]
+
+
+def test_install_and_rollback_rename_failures_preserve_recoverable_previous_site(
+    archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Break caught: failed installation and rollback make the previous site unavailable."""
+    destination = tmp_path / "dist"
+    destination.mkdir()
+    (destination / "keep.txt").write_text("previous publication", encoding="utf-8")
+    original_rename = Path.rename
+    destination_rename_attempts = 0
+
+    def fail_destination_renames(path: Path, target: Path) -> Path:
+        nonlocal destination_rename_attempts
+        if target == destination:
+            destination_rename_attempts += 1
+            raise OSError("injected install or rollback failure")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_destination_renames)
+
+    with pytest.raises(OSError, match="injected install or rollback failure"):
+        build_site(archive, destination)
+
+    backups = list(tmp_path.glob(".dist.old-*/keep.txt"))
+    assert destination_rename_attempts == 2
+    assert (destination / "keep.txt").read_text(encoding="utf-8") == "previous publication"
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "previous publication"

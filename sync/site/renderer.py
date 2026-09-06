@@ -44,9 +44,19 @@ def build_site(archive: Path, destination: Path, *, title: str = "Saved") -> Bud
         try:
             stage.rename(destination)
             installed = True
-        except OSError:
+        except OSError as install_error:
             if backup is not None:
-                backup.rename(destination)
+                try:
+                    backup.rename(destination)
+                except OSError:
+                    try:
+                        shutil.copytree(backup, destination)
+                    except OSError as copy_error:
+                        copy_error.add_note(f"Previous site remains at {backup}")
+                        raise
+                    install_error.add_note(
+                        f"Rollback rename failed; previous site was copied from {backup}"
+                    )
             raise
         return status
     finally:
