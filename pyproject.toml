@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "instagram-saved-archive"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "instaloader==4.15.3",
+    "Pillow==12.3.0",
+]
+
+[project.scripts]
+instagram-saved-archive = "sync.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.6",
+    "mypy==2.3.1",
+    "PyYAML==6.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/integration"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+ignore = ["TRY004"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
