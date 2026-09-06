@@ -153,13 +153,14 @@ def test_write_atomic_restores_the_previous_pair_when_second_replace_fails(
         "media/IMAGE0001/00-thumb.webp": b"preview bytes",
     }
     _write_files(store.root, files)
-    replace_calls = 0
+    state_path = store.root / "sync-state.json"
+    failed = False
     original_replace = os.replace
 
     def fail_second_replace(source: str | Path, destination: str | Path) -> None:
-        nonlocal replace_calls
-        replace_calls += 1
-        if replace_calls == 2:
+        nonlocal failed
+        if Path(destination) == state_path and not failed:
+            failed = True
             raise OSError("injected second final replacement failure")
         original_replace(source, destination)
 
@@ -171,6 +172,55 @@ def test_write_atomic_restores_the_previous_pair_when_second_replace_fails(
     assert store.load() == (old_manifest, old_state)
     assert (store.root / "manifest.json").read_bytes() == old_manifest_bytes
     assert (store.root / "sync-state.json").read_bytes() == old_state_bytes
+
+
+def test_fresh_store_recovers_a_terminated_write_after_manifest_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Break caught: an abrupt stop exposes a mixed metadata pair after a restart."""
+    store = SnapshotStore(tmp_path / "snapshot")
+    store.initialize()
+    files = {
+        "media/IMAGE0001/00.webp": b"primary bytes",
+        "media/IMAGE0001/00-thumb.webp": b"preview bytes",
+    }
+    _write_files(store.root, files)
+    old_manifest = _manifest_for_files(files)
+    old_state = _state()
+    store.write_atomic(old_manifest, old_state)
+    new_manifest = replace(old_manifest, posts=(replace(old_manifest.posts[0], caption="Updated"),))
+    new_state = replace(old_state, reconciliation_cursor=1)
+    manifest_path = store.root / "manifest.json"
+    manifest_replacements = 0
+    original_replace = os.replace
+
+    def terminate_after_manifest_replacement(source: str | Path, destination: str | Path) -> None:
+        nonlocal manifest_replacements
+        original_replace(source, destination)
+        if Path(destination) == manifest_path:
+            manifest_replacements += 1
+            if manifest_replacements == 1:
+                raise SystemExit("simulated process termination after manifest replacement")
+
+    monkeypatch.setattr("sync.archive.store.os.replace", terminate_after_manifest_replacement)
+
+    with pytest.raises(SystemExit, match="simulated process termination"):
+        store.write_atomic(new_manifest, new_state)
+
+    assert (store.root / ".metadata-transaction.json").is_file()
+    recovered = SnapshotStore(store.root)
+    recovered_manifest, recovered_state = recovered.load()
+
+    assert (recovered_manifest, recovered_state) in {
+        (old_manifest, old_state),
+        (new_manifest, new_state),
+    }
+    recovered.validate_files(recovered_manifest)
+    assert {path.name for path in store.root.iterdir()} == {
+        "manifest.json",
+        "sync-state.json",
+        "media",
+    }
 
 
 def test_validate_files_accepts_recorded_files_and_reports_snapshot_size(tmp_path: Path) -> None:

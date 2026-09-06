@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import tempfile
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .models import (
     SCHEMA_VERSION,
@@ -23,7 +26,18 @@ from .validation import validate_manifest
 MANIFEST_FILENAME = "manifest.json"
 SYNC_STATE_FILENAME = "sync-state.json"
 MEDIA_DIRECTORY = "media"
+TRANSACTION_FILENAME = ".metadata-transaction.json"
 _HASH_BLOCK_SIZE = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _MetadataTransaction:
+    phase: Literal["prepared", "committed"]
+    old_manifest: bytes | None
+    old_state: bytes | None
+    new_manifest: bytes
+    new_state: bytes
+    temporary_files: tuple[str, str]
 
 
 class SnapshotStore:
@@ -35,6 +49,7 @@ class SnapshotStore:
     def initialize(self) -> None:
         """Create the required empty snapshot layout when it does not already exist."""
         self._ensure_root()
+        self._recover_pending_transaction()
         (self.root / MEDIA_DIRECTORY).mkdir(exist_ok=True)
         manifest_path = self.root / MANIFEST_FILENAME
         state_path = self.root / SYNC_STATE_FILENAME
@@ -48,6 +63,7 @@ class SnapshotStore:
     def load(self) -> tuple[Manifest, SyncState]:
         """Load strict typed records from both required snapshot documents."""
         self._ensure_root()
+        self._recover_pending_transaction()
         try:
             manifest_data: object = json.loads(
                 (self.root / MANIFEST_FILENAME).read_text(encoding="utf-8")
@@ -60,45 +76,65 @@ class SnapshotStore:
         return load_manifest(manifest_data), load_sync_state(state_data)
 
     def write_atomic(self, manifest: Manifest, state: SyncState) -> None:
-        """Persist canonical metadata by replacing each fsynced document atomically."""
+        """Persist metadata with recovery for an interruption between final replacements."""
         self._ensure_root()
+        self._recover_pending_transaction()
         validate_manifest(manifest)
         manifest_path = self.root / MANIFEST_FILENAME
         state_path = self.root / SYNC_STATE_FILENAME
+        journal_path = self.root / TRANSACTION_FILENAME
+        new_manifest_data = _canonical_json(dump_manifest(manifest)).encode("utf-8")
+        new_state_data = _canonical_json(dump_sync_state(state)).encode("utf-8")
         new_manifest: Path | None = None
         new_state: Path | None = None
-        old_manifest: Path | None = None
-        old_state: Path | None = None
-        replacement_started = False
         try:
-            new_manifest = _write_temporary(manifest_path, _canonical_json(dump_manifest(manifest)))
-            new_state = _write_temporary(state_path, _canonical_json(dump_sync_state(state)))
-            old_manifest = _backup_temporary(manifest_path)
-            old_state = _backup_temporary(state_path)
-            replacement_started = True
-            os.replace(new_manifest, manifest_path)
-            os.replace(new_state, state_path)
-            _fsync_directory(self.root)
-        except OSError:
-            if replacement_started:
-                _restore_document(manifest_path, old_manifest)
-                _restore_document(state_path, old_state)
-                _fsync_directory(self.root)
-            raise
-        finally:
+            new_manifest = _write_temporary(manifest_path, new_manifest_data)
+            new_state = _write_temporary(state_path, new_state_data)
+            assert new_manifest is not None
+            assert new_state is not None
+            transaction = _MetadataTransaction(
+                phase="prepared",
+                old_manifest=_read_document(manifest_path),
+                old_state=_read_document(state_path),
+                new_manifest=new_manifest_data,
+                new_state=new_state_data,
+                temporary_files=(new_manifest.name, new_state.name),
+            )
+        except BaseException:
             if new_manifest is not None:
                 new_manifest.unlink(missing_ok=True)
             if new_state is not None:
                 new_state.unlink(missing_ok=True)
-            if old_manifest is not None:
-                old_manifest.unlink(missing_ok=True)
-            if old_state is not None:
-                old_state.unlink(missing_ok=True)
+            raise
+        assert new_manifest is not None
+        assert new_state is not None
+        journal_durable = False
+        try:
+            _write_journal(journal_path, transaction)
+            journal_durable = True
+            os.replace(new_manifest, manifest_path)
+            os.replace(new_state, state_path)
+            _fsync_directory(self.root)
+            _write_journal(journal_path, _with_phase(transaction, "committed"))
+            _complete_transaction(journal_path, transaction)
+        except OSError:
+            if journal_durable or journal_path.exists():
+                self._recover_pending_transaction()
+            else:
+                new_manifest.unlink(missing_ok=True)
+                new_state.unlink(missing_ok=True)
+            raise
+        except BaseException:
+            if not journal_path.exists():
+                new_manifest.unlink(missing_ok=True)
+                new_state.unlink(missing_ok=True)
+            raise
 
     def validate_files(self, manifest: Manifest) -> None:
         """Validate every referenced asset and reject unexpected media files or symlinks."""
         validate_manifest(manifest)
         self._ensure_root()
+        self._recover_pending_transaction()
         root = self.root.resolve(strict=True)
         snapshot_files = tuple(_walk_files(root))
         expected_paths: set[Path] = set()
@@ -139,6 +175,7 @@ class SnapshotStore:
         if not self.root.exists():
             return 0
         self._ensure_root()
+        self._recover_pending_transaction()
         return sum(path.stat().st_size for path in _walk_files(self.root.resolve(strict=True)))
 
     def _ensure_root(self) -> None:
@@ -147,6 +184,22 @@ class SnapshotStore:
         self.root.mkdir(parents=True, exist_ok=True)
         if not self.root.is_dir():
             raise ValueError("snapshot root must be a directory")
+
+    def _recover_pending_transaction(self) -> None:
+        journal_path = self.root / TRANSACTION_FILENAME
+        if journal_path.is_symlink():
+            raise ValueError("snapshot transaction journal must not be a symlink")
+        if not journal_path.exists():
+            return
+        transaction = _load_transaction(journal_path)
+        if transaction.phase == "prepared":
+            _replace_document(self.root / MANIFEST_FILENAME, transaction.old_manifest)
+            _replace_document(self.root / SYNC_STATE_FILENAME, transaction.old_state)
+        else:
+            _replace_document(self.root / MANIFEST_FILENAME, transaction.new_manifest)
+            _replace_document(self.root / SYNC_STATE_FILENAME, transaction.new_state)
+        _fsync_directory(self.root)
+        _complete_transaction(journal_path, transaction)
 
 
 def _empty_sync_state() -> SyncState:
@@ -182,19 +235,124 @@ def _write_temporary(destination: Path, content: str | bytes) -> Path:
         raise
 
 
-def _backup_temporary(destination: Path) -> Path | None:
+def _read_document(destination: Path) -> bytes | None:
+    if destination.is_symlink():
+        raise ValueError(f"snapshot document must be a real file: {destination.name}")
     if not destination.exists():
         return None
-    if destination.is_symlink() or not destination.is_file():
+    if not destination.is_file():
         raise ValueError(f"snapshot document must be a real file: {destination.name}")
-    return _write_temporary(destination, destination.read_bytes())
+    return destination.read_bytes()
 
 
-def _restore_document(destination: Path, backup: Path | None) -> None:
-    if backup is None:
+def _replace_document(destination: Path, content: bytes | None) -> None:
+    if content is None:
         destination.unlink(missing_ok=True)
-    else:
-        os.replace(backup, destination)
+        return
+    temporary = _write_temporary(destination, content)
+    try:
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _with_phase(
+    transaction: _MetadataTransaction, phase: Literal["prepared", "committed"]
+) -> _MetadataTransaction:
+    return _MetadataTransaction(
+        phase=phase,
+        old_manifest=transaction.old_manifest,
+        old_state=transaction.old_state,
+        new_manifest=transaction.new_manifest,
+        new_state=transaction.new_state,
+        temporary_files=transaction.temporary_files,
+    )
+
+
+def _write_journal(path: Path, transaction: _MetadataTransaction) -> None:
+    temporary = _write_temporary(path, _canonical_json(_dump_transaction(transaction)))
+    try:
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _dump_transaction(transaction: _MetadataTransaction) -> dict[str, object]:
+    return {
+        "phase": transaction.phase,
+        "old_manifest": _encode_optional_bytes(transaction.old_manifest),
+        "old_state": _encode_optional_bytes(transaction.old_state),
+        "new_manifest": _encode_bytes(transaction.new_manifest),
+        "new_state": _encode_bytes(transaction.new_state),
+        "temporary_files": list(transaction.temporary_files),
+        "version": 1,
+    }
+
+
+def _load_transaction(path: Path) -> _MetadataTransaction:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("snapshot transaction journal must be a real file")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("snapshot transaction journal is invalid") from error
+    if not isinstance(data, dict) or set(data) != {
+        "phase",
+        "old_manifest",
+        "old_state",
+        "new_manifest",
+        "new_state",
+        "temporary_files",
+        "version",
+    }:
+        raise ValueError("snapshot transaction journal has an invalid shape")
+    if data["version"] != 1 or data["phase"] not in {"prepared", "committed"}:
+        raise ValueError("snapshot transaction journal has an invalid version or phase")
+    temporary_files = data["temporary_files"]
+    if (
+        not isinstance(temporary_files, list)
+        or len(temporary_files) != 2
+        or any(not isinstance(item, str) or Path(item).name != item for item in temporary_files)
+    ):
+        raise ValueError("snapshot transaction journal has invalid temporary file names")
+    phase: Literal["prepared", "committed"] = data["phase"]
+    return _MetadataTransaction(
+        phase=phase,
+        old_manifest=_decode_optional_bytes(data["old_manifest"]),
+        old_state=_decode_optional_bytes(data["old_state"]),
+        new_manifest=_decode_bytes(data["new_manifest"]),
+        new_state=_decode_bytes(data["new_state"]),
+        temporary_files=(temporary_files[0], temporary_files[1]),
+    )
+
+
+def _encode_bytes(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _encode_optional_bytes(value: bytes | None) -> str | None:
+    return None if value is None else _encode_bytes(value)
+
+
+def _decode_bytes(value: object) -> bytes:
+    if not isinstance(value, str):
+        raise ValueError("snapshot transaction journal has invalid encoded data")
+    try:
+        return base64.b64decode(value, validate=True)
+    except ValueError as error:
+        raise ValueError("snapshot transaction journal has invalid encoded data") from error
+
+
+def _decode_optional_bytes(value: object) -> bytes | None:
+    return None if value is None else _decode_bytes(value)
+
+
+def _complete_transaction(path: Path, transaction: _MetadataTransaction) -> None:
+    for temporary_name in transaction.temporary_files:
+        (path.parent / temporary_name).unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+    _fsync_directory(path.parent)
 
 
 def _fsync_directory(directory: Path) -> None:
