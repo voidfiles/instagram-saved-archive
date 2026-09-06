@@ -125,7 +125,7 @@ archive-data/
 - First archive discovery timestamp in UTC ISO 8601 form.
 - Last successful public-source verification timestamp in UTC ISO 8601 form.
 - Media type: `image`, `video`, or `carousel`.
-- Ordered media records containing local POSIX path, MIME type, width, height, optional duration, byte size, and lowercase SHA-256 digest.
+- Ordered media records keyed by zero-based carousel position. Each record identifies whether the source item is an image or video, contains a primary asset record with local POSIX path, MIME type, width, height, byte size, and lowercase SHA-256 digest, and contains a WebP preview asset record with the same integrity metadata. Image previews are thumbnails; video previews are posters. Video records also contain duration.
 - Publication state and a machine-readable reason when unpublished.
 
 The public snapshot contains only published records. Transient unpublished candidates exist only in the workflow's temporary directory and private job summary. The manifest never records metadata about skipped private posts. Sync logs report only aggregate private-skip counts.
@@ -396,4 +396,3 @@ Normal administration happens through GitHub Actions and small pull requests to 
 - The 1 GB Pages limit makes the design unsuitable for a substantially larger or video-heavy archive.
 - Removal from the current snapshot does not guarantee immediate purge from caches or unreachable Git storage.
 - Instagram Collections cannot be reproduced with the selected toolchain.
-
