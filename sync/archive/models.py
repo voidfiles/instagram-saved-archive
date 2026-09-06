@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from .validation import parse_utc
 
 SCHEMA_VERSION = 1
+MAX_GENERATED_FILE_BYTES = 95 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -233,7 +234,7 @@ def _load_asset(data: object, context: str) -> AssetRecord:
         mime_type=_require_nonempty_string(value["mime_type"], f"{context}.mime_type"),
         width=_require_positive_int(value["width"], f"{context}.width"),
         height=_require_positive_int(value["height"], f"{context}.height"),
-        byte_size=_require_positive_int(value["byte_size"], f"{context}.byte_size"),
+        byte_size=_require_asset_byte_size(value["byte_size"], f"{context}.byte_size"),
         sha256=_require_sha256(value["sha256"], f"{context}.sha256"),
     )
 
@@ -299,8 +300,9 @@ def _strict_object(
 
 
 def _require_schema_version(data: dict[str, object], context: str) -> None:
-    if data["schema_version"] != SCHEMA_VERSION or isinstance(data["schema_version"], bool):
-        raise ValueError(f"unsupported {context} schema version: {data['schema_version']!r}")
+    version = data["schema_version"]
+    if not isinstance(version, int) or isinstance(version, bool) or version != SCHEMA_VERSION:
+        raise ValueError(f"unsupported {context} schema version: {version!r}")
 
 
 def _require_list(value: object, context: str) -> list[object]:
@@ -325,6 +327,13 @@ def _require_nonnegative_int(value: object, context: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{context} must be a non-negative integer")
     return value
+
+
+def _require_asset_byte_size(value: object, context: str) -> int:
+    byte_size = _require_positive_int(value, context)
+    if byte_size > MAX_GENERATED_FILE_BYTES:
+        raise ValueError(f"{context} must not exceed 95 MiB")
+    return byte_size
 
 
 def _require_bool(value: object, context: str) -> bool:

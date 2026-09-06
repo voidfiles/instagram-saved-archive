@@ -56,7 +56,7 @@ def valid_manifest_dict() -> dict[str, Any]:
                 "creator_id": 101,
                 "source_url": "https://www.instagram.com/p/CAROUSEL1/",
                 "caption": "Cafe\u0301\r\nMenu\u0301\rToday",
-                "published_at": "2025-02-02T03:04:05+00:00",
+                "published_at": "2025-02-02T03:04:05Z",
                 "archived_at": "2025-02-03T03:04:05Z",
                 "verified_at": "2025-02-04T03:04:05Z",
                 "media_type": "carousel",
@@ -157,6 +157,34 @@ def test_validate_manifest_rejects_a_programmatically_added_non_normalized_capti
         validation.validate_manifest(invalid_manifest)
 
 
+def test_validate_manifest_rejects_an_oversized_programmatic_preview(
+    valid_manifest_dict: dict[str, Any],
+) -> None:
+    """Break caught: direct validation permits an asset larger than 95 MiB."""
+    models = importlib.import_module("sync.archive.models")
+    validation = importlib.import_module("sync.archive.validation")
+    manifest = models.load_manifest(valid_manifest_dict)
+    oversized_preview = replace(manifest.posts[0].media[0].preview, byte_size=99_614_721)
+    oversized_media = replace(manifest.posts[0].media[0], preview=oversized_preview)
+    invalid_post = replace(manifest.posts[0], media=(oversized_media, *manifest.posts[0].media[1:]))
+    invalid_manifest = replace(manifest, posts=(invalid_post, *manifest.posts[1:]))
+
+    with pytest.raises(ValueError):
+        validation.validate_manifest(invalid_manifest)
+
+
+def test_validate_manifest_rejects_a_non_integer_schema_version(
+    valid_manifest_dict: dict[str, Any],
+) -> None:
+    """Break caught: direct validation accepts a float schema version equal to one."""
+    models = importlib.import_module("sync.archive.models")
+    validation = importlib.import_module("sync.archive.validation")
+    invalid_manifest = replace(models.load_manifest(valid_manifest_dict), schema_version=1.0)
+
+    with pytest.raises(ValueError):
+        validation.validate_manifest(invalid_manifest)
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
@@ -168,6 +196,7 @@ def test_validate_manifest_rejects_a_programmatically_added_non_normalized_capti
             "duplicate media positions",
         ),
         (lambda data: data.__setitem__("schema_version", 2), "unknown future schema"),
+        (lambda data: data.__setitem__("schema_version", 1.0), "non-integer schema version"),
         (
             lambda data: data["posts"][0].__setitem__("published_at", "2025-01-02T03:04:05-05:00"),
             "non-UTC timestamp",
@@ -187,6 +216,18 @@ def test_validate_manifest_rejects_a_programmatically_added_non_normalized_capti
         (
             lambda data: data["posts"][0]["media"][0]["asset"].__setitem__("sha256", "not-a-digest"),
             "invalid SHA-256",
+        ),
+        (
+            lambda data: data["posts"][0]["media"][0]["asset"].__setitem__(
+                "byte_size", 99_614_721
+            ),
+            "primary asset larger than 95 MiB",
+        ),
+        (
+            lambda data: data["posts"][0]["media"][0]["preview"].__setitem__(
+                "byte_size", 99_614_721
+            ),
+            "preview asset larger than 95 MiB",
         ),
         (lambda data: data["posts"][1]["media"][1].pop("duration_seconds"), "video without duration"),
         (

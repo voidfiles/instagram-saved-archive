@@ -6,9 +6,11 @@ from datetime import UTC, datetime
 
 
 def parse_utc(value: str) -> datetime:
-    """Parse an ISO 8601 timestamp, accepting only a UTC offset."""
+    """Parse an ISO 8601 timestamp encoded with a trailing UTC ``Z``."""
     if not isinstance(value, str):
         raise ValueError("timestamp must be a string")
+    if not value.endswith("Z"):
+        raise ValueError("timestamp must use trailing Z")
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
@@ -24,7 +26,11 @@ def validate_manifest(manifest: object) -> None:
 
     if not isinstance(manifest, models.Manifest):
         raise ValueError("manifest must be a Manifest")
-    if manifest.schema_version != models.SCHEMA_VERSION:
+    if (
+        not isinstance(manifest.schema_version, int)
+        or isinstance(manifest.schema_version, bool)
+        or manifest.schema_version != models.SCHEMA_VERSION
+    ):
         raise ValueError(f"unsupported manifest schema version: {manifest.schema_version!r}")
     if not isinstance(manifest.posts, tuple):
         raise ValueError("manifest posts must be a tuple")
@@ -111,5 +117,5 @@ def _validate_asset(asset: object, asset_paths: set[str]) -> None:
     models._require_nonempty_string(asset.mime_type, "asset.mime_type")
     models._require_positive_int(asset.width, "asset.width")
     models._require_positive_int(asset.height, "asset.height")
-    models._require_positive_int(asset.byte_size, "asset.byte_size")
+    models._require_asset_byte_size(asset.byte_size, "asset.byte_size")
     models._require_sha256(asset.sha256, "asset.sha256")
