@@ -122,7 +122,9 @@ class SyncEngine:
                 snapshot_bytes=state.archive_byte_size,
             )
         finally:
-            if stage.exists():
+            # A published transaction owns cleanup, including resumable partial deletion.
+            # Never bypass its durable phase if recovery or marker publication failed.
+            if stage.exists() and not _swap_marker(snapshot).exists():
                 shutil.rmtree(stage, ignore_errors=True)
 
     def _discover(
@@ -354,6 +356,7 @@ class _SwapTransaction:
     stage_name: str
     original_identity: tuple[int, int]
     stage_identity: tuple[int, int]
+    phase: str = "prepared"
 
 
 def _swap_marker(snapshot: Path) -> Path:
@@ -372,26 +375,37 @@ def _prepare_swap_transaction(snapshot: Path, stage: Path) -> _SwapTransaction:
         stage.name, _directory_identity(snapshot), _directory_identity(stage)
     )
     marker = _swap_marker(snapshot)
-    # Exclusive creation refuses collisions. The original may intentionally have no
-    # metadata: identity proves it is the exact directory accepted at transaction entry.
-    with marker.open("x", encoding="utf-8") as stream:
-        try:
+    if marker.exists() or marker.is_symlink():
+        raise ValidationError("swap transaction marker already exists")
+    _publish_swap_transaction(snapshot, transaction)
+    return transaction
+
+
+def _publish_swap_transaction(snapshot: Path, transaction: _SwapTransaction) -> None:
+    # A crash can leave an unpublished temp without durable ownership proof. Startup
+    # ignores such siblings; it must never glob-delete them or parse them as markers.
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{snapshot.name}.swap-marker-", dir=snapshot.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(
                 {
                     "snapshot_name": snapshot.name,
                     "stage_name": transaction.stage_name,
                     "original_identity": transaction.original_identity,
                     "stage_identity": transaction.stage_identity,
+                    "phase": transaction.phase,
                 },
                 stream,
             )
             stream.flush()
             os.fsync(stream.fileno())
-            _fsync_directory(snapshot.parent)
-        except BaseException:
-            marker.unlink()
-            raise
-    return transaction
+        os.replace(temporary, _swap_marker(snapshot))
+        _fsync_directory(snapshot.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_swap_transaction(snapshot: Path) -> _SwapTransaction | None:
@@ -401,13 +415,17 @@ def _read_swap_transaction(snapshot: Path) -> _SwapTransaction | None:
     if not marker.exists():
         return None
     data: object = json.loads(marker.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or set(data) != {
+    fields = {
         "snapshot_name",
         "stage_name",
         "original_identity",
         "stage_identity",
-    }:
+    }
+    if not isinstance(data, dict) or set(data) not in (fields, fields | {"phase"}):
         raise ValidationError("invalid swap transaction marker")
+    phase = data.get("phase", "prepared")
+    if not isinstance(phase, str) or phase not in ("prepared", "cleanup_stage", "cleanup_backup"):
+        raise ValidationError("invalid swap transaction phase")
     stage_name = data["stage_name"]
     if (
         data["snapshot_name"] != snapshot.name
@@ -420,6 +438,7 @@ def _read_swap_transaction(snapshot: Path) -> _SwapTransaction | None:
         stage_name,
         _parse_identity(data["original_identity"]),
         _parse_identity(data["stage_identity"]),
+        phase,
     )
 
 
@@ -442,10 +461,8 @@ def _recover_owned_swap(
     has_snapshot = snapshot.exists() or snapshot.is_symlink()
     if has_backup and _directory_identity(backup) != transaction.original_identity:
         raise ValidationError("backup does not belong to the swap transaction")
-    if has_stage:
-        if _directory_identity(stage) != transaction.stage_identity:
-            raise ValidationError("staging directory does not belong to the swap transaction")
-        _validate_snapshot(stage)
+    if has_stage and _directory_identity(stage) != transaction.stage_identity:
+        raise ValidationError("staging directory does not belong to the swap transaction")
     installed = False
     if has_snapshot:
         identity = _directory_identity(snapshot)
@@ -458,6 +475,14 @@ def _recover_owned_swap(
             raise ValidationError("snapshot does not belong to the swap transaction")
     elif not has_backup:
         raise ValidationError("swap transaction has no recoverable snapshot")
+    if transaction.phase == "cleanup_stage":
+        if not has_snapshot or installed or has_backup:
+            raise ValidationError("staging cleanup has no retained original snapshot")
+    elif transaction.phase == "cleanup_backup":
+        if not installed or has_stage:
+            raise ValidationError("backup cleanup has no validated installed snapshot")
+    elif has_stage:
+        _validate_snapshot(stage)
     # Every existing name has been checked before any move or deletion.
     if installed and rollback:
         if not has_backup:
@@ -467,10 +492,14 @@ def _recover_owned_swap(
         has_stage = True
     if has_backup:
         if has_snapshot:
+            if transaction.phase != "cleanup_backup":
+                _publish_swap_transaction(snapshot, replace(transaction, phase="cleanup_backup"))
             shutil.rmtree(backup)
         else:
             os.replace(backup, snapshot)
     if has_stage:
+        if transaction.phase != "cleanup_stage":
+            _publish_swap_transaction(snapshot, replace(transaction, phase="cleanup_stage"))
         shutil.rmtree(stage)
     _fsync_directory(snapshot.parent)
     _swap_marker(snapshot).unlink()

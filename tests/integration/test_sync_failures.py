@@ -411,7 +411,8 @@ def test_empty_recovery_refuses_unrecognized_backup_ownership(
     assert marker.exists() is with_marker
 
 
-def test_swap_marker_cannot_claim_a_different_backup_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("phase", ["prepared", "cleanup_stage", "cleanup_backup"])
+def test_swap_marker_cannot_claim_a_different_backup_directory(tmp_path: Path, phase: str) -> None:
     import json
     import shutil
 
@@ -431,6 +432,7 @@ def test_swap_marker_cannot_claim_a_different_backup_directory(tmp_path: Path) -
                 "stage_name": stage.name,
                 "original_identity": [original.stat().st_dev, original.stat().st_ino],
                 "stage_identity": [stage.stat().st_dev, stage.stat().st_ino],
+                "phase": phase,
             }
         ),
         encoding="utf-8",
@@ -443,3 +445,192 @@ def test_swap_marker_cannot_claim_a_different_backup_directory(tmp_path: Path) -
     assert original.is_dir()
     assert stage.is_dir()
     assert marker.is_file()
+
+
+@pytest.mark.parametrize("when", ["serialization", "before_publish", "after_publish"])
+def test_marker_publication_crash_preserves_original_and_allows_restart(
+    tmp_path: Path, when: str
+) -> None:
+    import subprocess
+    import sys
+    import textwrap
+
+    harness = SyncHarness(tmp_path)
+    harness.seed(1)
+    before = harness.snapshot_bytes()
+    unrelated = tmp_path / ".snapshot.swap-marker-caller-owned"
+    unrelated.write_bytes(b"do not glob-delete this file")
+    code = textwrap.dedent("""
+        import os
+        import sys
+        from pathlib import Path
+        from sync import engine
+        from tests.integration.fakes import FakeInstagramClient, NOW
+
+        root = Path(sys.argv[1])
+        when = sys.argv[2]
+        marker = root / '.snapshot.swap-transaction.json'
+        real_dump = engine.json.dump
+        real_replace = os.replace
+
+        def dump(data, stream, *args, **kwargs):
+            if when == 'serialization' and 'snapshot_name' in data:
+                stream.write('{"snapshot_name":')
+                stream.flush()
+                os._exit(77)
+            return real_dump(data, stream, *args, **kwargs)
+
+        def replace(source, destination):
+            if Path(destination) == marker and when == 'before_publish':
+                os._exit(77)
+            real_replace(source, destination)
+            if Path(destination) == marker and when == 'after_publish':
+                os._exit(77)
+
+        engine.json.dump = dump
+        engine.os.replace = replace
+        engine.SyncEngine(FakeInstagramClient()).run(
+            root / 'snapshot', root / 'removals.txt', NOW, engine.SyncOptions()
+        )
+    """)
+    child = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path), when],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert child.returncode == 77, child.stderr.decode()
+    assert harness.snapshot_bytes() == before
+    orphans = {
+        path: path.read_bytes()
+        for path in tmp_path.glob(".snapshot.swap-marker-*")
+        if path != unrelated
+    }
+    harness.client.feed_failure = RuntimeError("stop after recovery")
+    with pytest.raises(RuntimeError, match="stop after recovery"):
+        harness.run()
+    assert harness.snapshot_bytes() == before
+    assert unrelated.read_bytes() == b"do not glob-delete this file"
+    assert not (tmp_path / ".snapshot.swap-transaction.json").exists()
+    for path, data in orphans.items():
+        assert path.read_bytes() == data
+        assert path.stat().st_mode & 0o777 == 0o600
+    if when != "after_publish":
+        assert len(orphans) == 1
+    harness.client.feed_failure = None
+    assert harness.run().backfill_complete
+    assert set(tmp_path.glob(".snapshot.swap-marker-*")) == {*orphans, unrelated}
+
+
+@pytest.mark.parametrize("target", ["stage", "backup"])
+def test_partial_owned_cleanup_resumes_after_hard_exit(tmp_path: Path, target: str) -> None:
+    import json
+    import subprocess
+    import sys
+    import textwrap
+
+    harness = SyncHarness(tmp_path)
+    harness.seed(2)
+    code = textwrap.dedent("""
+        import json
+        import os
+        import sys
+        from pathlib import Path
+        from sync import engine
+        from tests.integration.fakes import FakeInstagramClient, NOW, public_image
+
+        root = Path(sys.argv[1])
+        target = sys.argv[2]
+        real_replace = os.replace
+        real_rmtree = engine.shutil.rmtree
+        real_fsync = os.fsync
+        interrupted = False
+        synced = set()
+
+        def fsync(fd):
+            real_fsync(fd)
+            stat = os.fstat(fd)
+            synced.add((stat.st_dev, stat.st_ino))
+
+        def replace(source, destination):
+            global interrupted
+            real_replace(source, destination)
+            if target == 'stage' and Path(destination) == root / '.snapshot.backup' and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+
+        def rmtree(path, *args, **kwargs):
+            path = Path(path)
+            matches = (
+                target == 'stage' and path.name.startswith('.snapshot.staging-')
+                or target == 'backup' and path == root / '.snapshot.backup'
+            )
+            if matches:
+                marker = root / '.snapshot.swap-transaction.json'
+                if json.loads(marker.read_text())['phase'] != 'cleanup_' + target:
+                    os._exit(78)
+                for retained in (marker, root):
+                    stat = retained.stat()
+                    if (stat.st_dev, stat.st_ino) not in synced:
+                        os._exit(79)
+                (path / 'manifest.json').unlink()
+                os._exit(77)
+            return real_rmtree(path, *args, **kwargs)
+
+        engine.os.replace = replace
+        engine.os.fsync = fsync
+        engine.shutil.rmtree = rmtree
+        client = FakeInstagramClient()
+        client.saved = [public_image('NEWPUBLIC')]
+        engine.SyncEngine(client).run(
+            root / 'snapshot', root / 'removals.txt', NOW, engine.SyncOptions()
+        )
+    """)
+    child = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path), target],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert child.returncode == 77, child.stderr.decode()
+    marker = tmp_path / ".snapshot.swap-transaction.json"
+    transaction = json.loads(marker.read_text(encoding="utf-8"))
+    partial = tmp_path / (transaction["stage_name"] if target == "stage" else ".snapshot.backup")
+    assert partial.is_dir()
+    assert not (partial / "manifest.json").exists()
+    retained = harness.snapshot_bytes()
+    harness.client.feed_failure = RuntimeError("stop after recovery")
+    with pytest.raises(RuntimeError, match="stop after recovery"):
+        harness.run()
+    assert harness.snapshot_bytes() == retained
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["removals.txt", "snapshot"]
+    harness.client.feed_failure = None
+    assert harness.run().backfill_complete
+
+
+def test_failed_marker_serialization_cleans_only_owned_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import TextIO
+
+    harness = SyncHarness(tmp_path)
+    harness.seed(1)
+    before = harness.snapshot_bytes()
+    unrelated = tmp_path / ".snapshot.swap-marker-caller-owned"
+    unrelated.write_bytes(b"preserve unrelated temp")
+
+    def fail_dump(data: object, stream: TextIO) -> None:
+        stream.write("{")
+        stream.flush()
+        raise RuntimeError("serialization interrupted")
+
+    monkeypatch.setattr("sync.engine.json.dump", fail_dump)
+    with pytest.raises(RuntimeError, match="serialization interrupted"):
+        harness.run()
+    assert harness.snapshot_bytes() == before
+    assert unrelated.read_bytes() == b"preserve unrelated temp"
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        ".snapshot.swap-marker-caller-owned",
+        "removals.txt",
+        "snapshot",
+    ]
