@@ -27,7 +27,7 @@ from sync.instagram.protocol import InstagramClient
 from sync.media.processor import PostMediaProcessor
 from sync.reporting import SyncReport
 
-__all__ = ["SyncEngine", "SyncOptions", "SyncReport"]
+__all__ = ["SyncEngine", "SyncOptions", "SyncReport", "recover_snapshot"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +68,10 @@ class SyncEngine:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValidationError("sync time must be timezone-aware")
         now = now.astimezone(UTC)
-        if snapshot.is_symlink():
-            raise ValidationError("snapshot must be a plain directory")
         snapshot = snapshot.absolute()
+        recover_snapshot(snapshot)
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         backup = snapshot.with_name(f".{snapshot.name}.backup")
-        _recover_swap(snapshot, backup)
         stage = Path(tempfile.mkdtemp(prefix=f".{snapshot.name}.staging-", dir=snapshot.parent))
         try:
             if snapshot.exists():
@@ -287,6 +285,18 @@ def _write_sized_metadata(store: SnapshotStore, manifest: Manifest, state: SyncS
             return state
         state = replace(state, archive_byte_size=actual)
     raise ValidationError("snapshot size accounting did not converge")
+
+
+def recover_snapshot(snapshot: Path) -> None:
+    """Recover a prior local swap before validating or accessing Instagram.
+
+    Callers must serialize access. An absent snapshot can have an owned backup;
+    the existing transaction recovery validates every name before mutating it.
+    """
+    snapshot = snapshot.absolute()
+    if any(component.is_symlink() for component in (snapshot, *snapshot.parents)):
+        raise ValidationError("snapshot path components must not be symlinks")
+    _recover_swap(snapshot, snapshot.with_name(f".{snapshot.name}.backup"))
 
 
 def _recover_swap(snapshot: Path, backup: Path) -> None:

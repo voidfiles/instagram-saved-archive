@@ -17,7 +17,7 @@ from sync.archive.budget import BudgetStatus, check_budget
 from sync.archive.publisher import publish_snapshot
 from sync.archive.store import SnapshotStore
 from sync.bootstrap_session import bootstrap_session
-from sync.engine import SyncEngine, SyncOptions
+from sync.engine import SyncEngine, SyncOptions, recover_snapshot
 from sync.instagram.client import InstaloaderClient
 from sync.instagram.errors import ArchiveError, AuthenticationError, ValidationError
 from sync.instagram.retry import RetryPolicy, retry_transport
@@ -128,7 +128,8 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
             os.environ,
         )
     elif args.command == "sync":
-        snapshot = resolve_plain_path(args.snapshot)
+        snapshot = resolve_plain_path(args.snapshot, must_exist=False)
+        recover_snapshot(snapshot)
         session = resolve_plain_path(args.session)
         removals = resolve_plain_path(args.removals)
         if not session.is_file() or not removals.is_file():

@@ -6,6 +6,7 @@ import base64
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from instaloader.exceptions import BadCredentialsException
@@ -29,6 +30,10 @@ class FakeBootstrapLoader:
         self.two_factor_codes: list[str] = []
         self.saved_path: Path | None = None
         self.mode_during_save: int | None = None
+        self.context = SimpleNamespace(error_log=[])
+
+    def login(self, username: str, password: str) -> None:
+        pass
 
     def interactive_login(self, username: str) -> None:
         self.interactive_calls.append(username)
@@ -135,3 +140,58 @@ def test_bootstrap_does_not_change_the_process_umask() -> None:
     observed = os.umask(0)
     os.umask(observed)
     assert observed == previous
+
+
+def test_real_interactive_retries_keep_prompts_but_sanitize_bad_credentials(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Break caught: the real password/2FA retry loop prints upstream exception payloads."""
+    from instaloader import Instaloader, InstaloaderContext
+    from instaloader.exceptions import TwoFactorAuthRequiredException
+
+    loader = Instaloader(max_connection_attempts=1)
+    password_attempts = 0
+    code_attempts = 0
+
+    def password_prompt(prompt):
+        print(prompt)
+        return "synthetic-password"
+
+    def code_prompt(prompt):
+        print(prompt)
+        return "246810"
+
+    def login(context, username, password):
+        nonlocal password_attempts
+        assert username == "archive_owner" and password == "synthetic-password"
+        password_attempts += 1
+        if password_attempts == 1:
+            raise BadCredentialsException("SYNTHETIC-PASSWORD-DETAIL")
+        raise TwoFactorAuthRequiredException("synthetic-2fa-required")
+
+    def two_factor(context, code):
+        nonlocal code_attempts
+        assert code == "246810"
+        code_attempts += 1
+        if code_attempts == 1:
+            raise BadCredentialsException("SYNTHETIC-2FA-DETAIL")
+        context.username = "archive_owner"
+
+    monkeypatch.setattr("getpass.getpass", password_prompt)
+    monkeypatch.setattr("builtins.input", code_prompt)
+    monkeypatch.setattr(InstaloaderContext, "login", login)
+    monkeypatch.setattr(InstaloaderContext, "two_factor_login", two_factor)
+    monkeypatch.setattr(
+        InstaloaderContext,
+        "graphql_query",
+        lambda *args, **kwargs: {"data": {"user": {"username": "archive_owner"}}},
+    )
+    encoded = bootstrap_session("archive_owner", loader_factory=lambda **options: loader)
+    loader.close()
+    output = capsys.readouterr()
+    assert base64.b64decode(encoded, validate=True)
+    assert password_attempts == 2 and code_attempts == 2
+    assert "Enter Instagram password for archive_owner" in output.out + output.err
+    assert "Enter 2FA verification code" in output.out + output.err
+    for secret in ("SYNTHETIC-PASSWORD-DETAIL", "SYNTHETIC-2FA-DETAIL", "synthetic-password"):
+        assert secret not in output.out + output.err
