@@ -2,13 +2,57 @@
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 import yaml  # type: ignore[import-untyped]
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "test.yml"
+PYPROJECT_PATH = REPOSITORY_ROOT / "pyproject.toml"
+REQUIRED_RUN_STEPS = {
+    "Check FFmpeg": (None, ("ffmpeg -version",)),
+    "Install Python dependencies": (
+        None,
+        (
+            "python -m pip install --upgrade pip",
+            "python -m pip install --group dev -e .",
+        ),
+    ),
+    "Run Python checks": (
+        None,
+        (
+            "python -m ruff format --check .",
+            "python -m ruff check .",
+            "python -m mypy sync",
+            "python -m pytest -q",
+        ),
+    ),
+    "Generate and validate offline archive fixture": (
+        None,
+        (
+            "python tests/fixtures/build_sample_archive.py --output .tmp/sample-archive",
+            "python -m sync.cli validate-snapshot --snapshot .tmp/sample-archive",
+            "python -m sync.cli prepare-site-input --snapshot .tmp/sample-archive --destination site/public/archive",
+        ),
+    ),
+    "Install site dependencies": ("site", ("npm ci",)),
+    "Check site": ("site", ("npm run check",)),
+    "Test site": ("site", ("npm test",)),
+    "Build site": ("site", ("npm run build",)),
+    "Check static output": ("site", ("npm run check:static",)),
+    "Install Playwright Chromium": ("site", ("npx playwright install chromium",)),
+    "Run browser tests": ("site", ("npm run test:e2e",)),
+}
+EXPECTED_STEP_NAMES = (
+    "Check out source",
+    "Set up Python",
+    "Set up Node",
+    *REQUIRED_RUN_STEPS,
+    "Upload Playwright diagnostics",
+)
 
 
 def _value(mapping: Mapping[object, object], key: str) -> object:
@@ -29,10 +73,13 @@ def _positive_timeout(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def _parse_workflow(raw: str) -> Mapping[object, object]:
+    return _mapping(yaml.safe_load(raw))
+
+
 def _workflow() -> Mapping[object, object]:
     assert WORKFLOW_PATH.is_file(), "offline CI workflow must exist"
-    parsed = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
-    return _mapping(parsed)
+    return _parse_workflow(WORKFLOW_PATH.read_text(encoding="utf-8"))
 
 
 def _steps(workflow: Mapping[object, object]) -> list[Mapping[object, object]]:
@@ -41,74 +88,142 @@ def _steps(workflow: Mapping[object, object]) -> list[Mapping[object, object]]:
     job = _mapping(jobs["test"])
     assert str(_value(job, "runs-on")).startswith("ubuntu")
     assert _positive_timeout(_value(job, "timeout-minutes"))
-    steps = _value(job, "steps")
-    assert isinstance(steps, list)
-    normalized = [_mapping(step) for step in steps]
-    assert all(_positive_timeout(_value(step, "timeout-minutes")) for step in normalized)
-    return normalized
+    values = _value(job, "steps")
+    assert isinstance(values, list)
+    steps = [_mapping(step) for step in values]
+    assert all(_positive_timeout(_value(step, "timeout-minutes")) for step in steps)
+    assert tuple(_value(step, "name") for step in steps) == EXPECTED_STEP_NAMES
+    return steps
 
 
-def _step_with_use(steps: list[Mapping[object, object]], use: str) -> Mapping[object, object]:
-    return next(step for step in steps if step.get("uses") == use)
+def _step_by_name(steps: list[Mapping[object, object]], name: str) -> Mapping[object, object]:
+    return next(step for step in steps if step.get("name") == name)
 
 
-def test_workflow_runs_the_offline_archive_and_site_gates_in_deterministic_order() -> None:
-    """Break caught: a PR can skip, reorder, or network-enable an archive/site verification gate."""
-    workflow = _workflow()
+def _step_index(steps: list[Mapping[object, object]], name: str) -> int:
+    return next(index for index, step in enumerate(steps) if step.get("name") == name)
+
+
+def _assert_action_steps(steps: list[Mapping[object, object]]) -> None:
+    actions = {
+        "Check out source": ("actions/checkout@v7", {"persist-credentials": False}),
+        "Set up Python": (
+            "actions/setup-python@v7",
+            {
+                "python-version": "3.12",
+                "cache": "pip",
+                "cache-dependency-path": "pyproject.toml",
+            },
+        ),
+        "Set up Node": (
+            "actions/setup-node@v7",
+            {
+                "node-version": "24",
+                "cache": "npm",
+                "cache-dependency-path": "site/package-lock.json",
+            },
+        ),
+    }
+    for name, (use, options) in actions.items():
+        step = _step_by_name(steps, name)
+        assert _value(step, "uses") == use
+        assert _value(step, "with") == options
+        assert "if" not in step, f"{name} must always execute"
+
+
+def _assert_run_steps(steps: list[Mapping[object, object]]) -> None:
+    for name, (directory, lines) in REQUIRED_RUN_STEPS.items():
+        step = _step_by_name(steps, name)
+        assert "if" not in step, f"{name} must always execute"
+        if directory is None:
+            assert "working-directory" not in step
+        else:
+            assert _value(step, "working-directory") == directory
+        run = _value(step, "run")
+        assert isinstance(run, str)
+        assert tuple(run.splitlines()) == lines
+
+
+def _assert_order(steps: list[Mapping[object, object]]) -> None:
+    expected_order = (
+        "Check out source",
+        "Set up Python",
+        "Set up Node",
+        "Install Python dependencies",
+        "Run Python checks",
+        "Generate and validate offline archive fixture",
+        "Install site dependencies",
+        "Check site",
+        "Test site",
+        "Build site",
+        "Check static output",
+        "Install Playwright Chromium",
+        "Run browser tests",
+    )
+    positions = [_step_index(steps, name) for name in expected_order]
+    assert positions == sorted(positions), "setup and offline gates must run in order"
+
+
+def _assert_workflow_contract(workflow: Mapping[object, object]) -> None:
     triggers = _mapping(_value(workflow, "on"))
-    assert "pull_request" in triggers
+    assert set(triggers) == {"pull_request", "push"}, "only PR and main-push triggers are allowed"
+    assert _value(triggers, "pull_request") is None
     push = _mapping(_value(triggers, "push"))
-    assert _value(push, "branches") == ["main"]
-
-    steps = _steps(workflow)
-    assert _step_with_use(steps, "actions/checkout@v7")
-    python_setup = _step_with_use(steps, "actions/setup-python@v7")
-    assert _value(_mapping(_value(python_setup, "with")), "python-version") == "3.12"
-    assert (
-        _value(_mapping(_value(python_setup, "with")), "cache-dependency-path") == "pyproject.toml"
-    )
-    node_setup = _step_with_use(steps, "actions/setup-node@v7")
-    assert _value(_mapping(_value(node_setup, "with")), "node-version") == "24"
-    assert (
-        _value(_mapping(_value(node_setup, "with")), "cache-dependency-path")
-        == "site/package-lock.json"
-    )
-
-    commands = "\n".join(str(step.get("run", "")) for step in steps)
-    required = [
-        "ffmpeg -version",
-        'python -m pip install -e ".[dev]"',
-        "python -m ruff format --check .",
-        "python -m ruff check .",
-        "python -m mypy sync",
-        "python -m pytest -q",
-        "python tests/fixtures/build_sample_archive.py --output .tmp/sample-archive",
-        "python -m sync.cli validate-snapshot --snapshot .tmp/sample-archive",
-        "python -m sync.cli prepare-site-input --snapshot .tmp/sample-archive --destination site/public/archive",
-        "npm ci",
-        "npm run check",
-        "npm test",
-        "npm run build",
-        "npm run check:static",
-        "npx playwright install chromium",
-        "npm run test:e2e",
-    ]
-    positions = [commands.index(command) for command in required]
-    assert positions == sorted(positions)
-    assert "python -m sync.cli sync" not in commands
-
-
-def test_workflow_uses_read_only_permissions_and_keeps_failure_diagnostics_short_lived() -> None:
-    """Break caught: offline checks gain credentials, write privileges, or persistent browser artifacts."""
-    workflow = _workflow()
+    assert push == {"branches": ["main"]}
     assert _value(workflow, "permissions") == {"contents": "read"}
+
     steps = _steps(workflow)
-    diagnostics = _step_with_use(steps, "actions/upload-artifact@v4")
+    _assert_action_steps(steps)
+    _assert_run_steps(steps)
+    _assert_order(steps)
+
+    diagnostics = _step_by_name(steps, "Upload Playwright diagnostics")
+    assert _value(diagnostics, "uses") == "actions/upload-artifact@v4"
     assert _value(diagnostics, "if") == "failure()"
-    diagnostic_options = _mapping(_value(diagnostics, "with"))
-    assert _value(diagnostic_options, "retention-days") == 3
+    assert _value(diagnostics, "with") == {
+        "name": "playwright-diagnostics",
+        "path": "site/test-results\nsite/playwright-report\n",
+        "if-no-files-found": "ignore",
+        "retention-days": 3,
+    }
 
     raw = WORKFLOW_PATH.read_text(encoding="utf-8")
-    forbidden = ("INSTAGRAM_SESSION_B64", "password", "set -x", "printenv", "env |")
+    forbidden = ("INSTAGRAM_SESSION_B64", "password", "set -x", "printenv", "env |", "write")
     assert not any(value.lower() in raw.lower() for value in forbidden)
-    assert "write" not in raw.lower()
+
+
+def test_workflow_enforces_the_offline_execution_boundary() -> None:
+    """Break caught: a gate is skipped, mislocated, reordered, or loses its exact command."""
+    _assert_workflow_contract(_workflow())
+
+
+def test_editable_package_discovery_includes_only_the_sync_package_tree() -> None:
+    """Break caught: flat-layout discovery accidentally packages the Astro site directory."""
+    metadata = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    discovery = metadata["tool"]["setuptools"]["packages"]["find"]
+    assert discovery == {"include": ["sync*"], "namespaces": False}
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("  pull_request:\n", "  pull_request:\n  workflow_dispatch:\n"),
+        ("          cache: pip\n", "          cache: false\n"),
+        (
+            "      - name: Install site dependencies\n        working-directory: site\n        run: npm ci\n",
+            "      - name: Install site dependencies\n        run: npm ci\n",
+        ),
+        (
+            "      - name: Build site\n        working-directory: site\n        run: npm run build\n",
+            "      - name: Build site\n        if: false\n        working-directory: site\n        run: npm run build\n",
+        ),
+        ("          python -m pytest -q\n", "          python -m pytest -q --disable-warnings\n"),
+    ],
+)
+def test_workflow_contract_rejects_bypass_mutations(original: str, replacement: str) -> None:
+    """Break caught: common textual mutations silently weaken a structured CI gate."""
+    raw = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert raw.count(original) == 1
+    mutated = _parse_workflow(raw.replace(original, replacement))
+    with pytest.raises(AssertionError):
+        _assert_workflow_contract(mutated)
