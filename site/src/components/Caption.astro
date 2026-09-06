@@ -1,0 +1,29 @@
+---
+interface Props {
+  caption: string;
+  shortcode: string;
+}
+const { caption, shortcode } = Astro.props;
+---
+
+{
+  caption && (
+    <div class="caption">
+      <p id={`caption-${shortcode}`} data-caption-text>
+        {caption}
+      </p>
+      {caption.length > 280 && (
+        <button
+          type="button"
+          class="text-button"
+          data-caption-toggle
+          aria-expanded="true"
+          aria-controls={`caption-${shortcode}`}
+          hidden
+        >
+          Show less
+        </button>
+      )}
+    </div>
+  )
+}

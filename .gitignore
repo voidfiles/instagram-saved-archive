@@ -10,6 +10,10 @@ htmlcov/
 .venv/
 venv/
 site/public/archive/
+site/node_modules/
+site/dist/
+site/.astro/
+.tmp/
 site/src/generated/
 site/test-results/
 site/playwright-report/

@@ -1,0 +1,57 @@
+---
+import type { ArchivePost } from "../data/archive";
+import MediaGallery from "./MediaGallery.astro";
+import Caption from "./Caption.astro";
+interface Props {
+  post: ArchivePost;
+}
+const { post } = Astro.props;
+const date = (value: string) =>
+  new Intl.DateTimeFormat("en", {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  }).format(new Date(value));
+---
+
+<article
+  class="post-row"
+  data-shortcode={post.shortcode}
+  data-media-type={post.media_type}
+  aria-labelledby={`creator-${post.shortcode}`}
+>
+  <header class="post-header">
+    <div>
+      <p class="eyebrow">
+        {post.media_type === "carousel" ? "Collection" : post.media_type}
+      </p><h2 id={`creator-${post.shortcode}`}>
+        <a
+          href={`https://www.instagram.com/${encodeURIComponent(post.creator_username)}/`}
+          target="_blank"
+          rel="noopener noreferrer">@{post.creator_username}</a
+        >
+      </h2>
+    </div><a
+      class="source-link"
+      href={post.source_url}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`View original post by @${post.creator_username} (opens in a new tab)`}
+      >View original <span aria-hidden="true">↗</span></a
+    >
+  </header>
+  <MediaGallery post={post} />
+  <div class="post-details">
+    <Caption caption={post.caption} shortcode={post.shortcode} /><footer
+      class="post-dates"
+    >
+      <span
+        >Posted <time datetime={post.published_at}
+          >{date(post.published_at)}</time
+        ></span
+      ><span
+        >Saved <time datetime={post.archived_at}>{date(post.archived_at)}</time
+        ></span
+      >
+    </footer>
+  </div>
+</article>

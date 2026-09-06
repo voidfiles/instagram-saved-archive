@@ -1,0 +1,38 @@
+---
+import { loadArchive, scriptSafeJson } from "../data/archive";
+import BaseLayout from "../layouts/BaseLayout.astro";
+import ArchiveHeader from "../components/ArchiveHeader.astro";
+import PostCard from "../components/PostCard.astro";
+import ArchiveFooter from "../components/ArchiveFooter.astro";
+const archive = loadArchive();
+const initialPosts = archive.posts.slice(0, 12);
+---
+
+<BaseLayout title={archive.title}>
+  <div id="archive" data-feed-root>
+    <ArchiveHeader title={archive.title} count={archive.posts.length} />
+    <main class="feed-shell">
+      <p class="feed-status" data-feed-status role="status">
+        {
+          archive.posts.length
+            ? `Showing ${initialPosts.length} of ${archive.posts.length} saved posts`
+            : "No saved posts yet."
+        }
+      </p>
+      <div id="posts" class="feed" data-post-list tabindex="-1">
+        {initialPosts.map((post) => <PostCard post={post} />)}
+      </div>
+      <div data-feed-sentinel aria-hidden="true"></div>
+    </main>
+    <ArchiveFooter
+      count={archive.posts.length}
+      sync_state={archive.sync_state}
+    />
+    <script
+      id="archive-data"
+      type="application/json"
+      is:inline
+      set:html={scriptSafeJson(archive)}
+    />
+  </div>
+</BaseLayout>

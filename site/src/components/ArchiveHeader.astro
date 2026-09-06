@@ -1,0 +1,16 @@
+---
+interface Props {
+  title: string;
+  count: number;
+}
+const { title, count } = Astro.props;
+---
+
+<header class="archive-header">
+  <div class="header-inner">
+    <div class="collection-title">
+      <p class="eyebrow">A personal collection</p><h1>{title}</h1>
+    </div>
+    <p class="collection-count">{count} saved posts</p>
+  </div>
+</header>

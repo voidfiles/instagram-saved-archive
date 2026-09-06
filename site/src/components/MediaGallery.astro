@@ -1,0 +1,98 @@
+---
+import { assetUrl, type ArchivePost } from "../data/archive";
+interface Props {
+  post: ArchivePost;
+}
+const { post } = Astro.props;
+const carousel = post.media.length > 1;
+---
+
+<section
+  class="media-gallery"
+  data-carousel={carousel ? "" : undefined}
+  aria-label={`Media by @${post.creator_username}`}
+  aria-roledescription={carousel ? "carousel" : undefined}
+  tabindex={carousel ? "0" : undefined}
+>
+  <div class="media-track" id={`media-${post.shortcode}`}>
+    {
+      post.media.map((item, index) => (
+        <figure
+          class="media-slide"
+          data-slide={index}
+          role={carousel ? "group" : undefined}
+          aria-roledescription={carousel ? "slide" : undefined}
+          aria-label={
+            carousel ? `${index + 1} of ${post.media.length}` : undefined
+          }
+        >
+          {item.kind === "image" ? (
+            <img
+              src={assetUrl(item.asset.asset_path)}
+              srcset={
+                item.preview.width !== item.asset.width
+                  ? `${assetUrl(item.preview.asset_path)} ${item.preview.width}w, ${assetUrl(item.asset.asset_path)} ${item.asset.width}w`
+                  : undefined
+              }
+              sizes="(max-width: 792px) calc(100vw - 32px), 760px"
+              width={item.asset.width}
+              height={item.asset.height}
+              alt={`Saved image ${index + 1} by @${post.creator_username}`}
+              loading="lazy"
+              decoding="async"
+            />
+          ) : (
+            <video
+              controls
+              preload="metadata"
+              poster={assetUrl(item.preview.asset_path)}
+              width={item.asset.width}
+              height={item.asset.height}
+              playsinline
+              aria-label={`Saved video ${index + 1} by @${post.creator_username}`}
+            >
+              <source
+                src={assetUrl(item.asset.asset_path)}
+                type={item.asset.mime_type}
+              />
+              <p>
+                Your browser cannot play this video.{" "}
+                <a href={assetUrl(item.asset.asset_path)}>Download the video</a>
+                .
+              </p>
+            </video>
+          )}
+        </figure>
+      ))
+    }
+  </div>
+  {
+    carousel && (
+      <div class="carousel-controls">
+        <>
+          <button
+            type="button"
+            data-carousel-prev
+            aria-label="Previous slide"
+            aria-controls={`media-${post.shortcode}`}
+            hidden
+          >
+            ←
+          </button>
+          <p class="carousel-status" data-carousel-status aria-live="polite">
+            {post.media.length} slides · Scroll to explore
+          </p>
+          <button
+            type="button"
+            data-carousel-next
+            aria-label="Next slide"
+            aria-controls={`media-${post.shortcode}`}
+            hidden
+          >
+            →
+          </button>
+        </>
+      </div>
+    )
+  }
+</section>

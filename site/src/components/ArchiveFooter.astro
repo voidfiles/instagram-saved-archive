@@ -1,0 +1,34 @@
+---
+import type { SyncState } from "../data/archive";
+interface Props {
+  count: number;
+  sync_state: SyncState;
+}
+const { count, sync_state } = Astro.props;
+const synced = sync_state.last_successful_sync_at;
+---
+
+<footer class="archive-footer">
+  <p>
+    {count} saved posts · {
+      synced ? (
+        <>
+          Last synced{" "}
+          <time datetime={synced}>
+            {new Intl.DateTimeFormat("en", {
+              dateStyle: "medium",
+              timeStyle: "short",
+              timeZone: "UTC",
+            }).format(new Date(synced))}{" "}
+            UTC
+          </time>
+        </>
+      ) : (
+        "No successful sync yet"
+      )
+    }
+  </p><p>
+    Posts link to their original sources. All rights remain with the original
+    creators.
+  </p>
+</footer>
