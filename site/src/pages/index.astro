@@ -23,6 +23,9 @@ const initialPosts = archive.posts.slice(0, 12);
         {initialPosts.map((post) => <PostCard post={post} />)}
       </div>
       <div data-feed-sentinel aria-hidden="true"></div>
+      <button type="button" class="load-more" data-feed-more hidden
+        >Load more posts</button
+      >
     </main>
     <ArchiveFooter
       count={archive.posts.length}
@@ -36,3 +39,19 @@ const initialPosts = archive.posts.slice(0, 12);
     />
   </div>
 </BaseLayout>
+
+<script>
+  import type { ArchiveData } from "../data/archive";
+  import { mountFeed } from "../lib/feed-controller";
+
+  const root = document.querySelector<HTMLElement>("[data-feed-root]");
+  const data = document.getElementById("archive-data");
+  if (root && data?.textContent) {
+    const archive: ArchiveData = JSON.parse(data.textContent);
+    const cleanup = mountFeed(root, archive.posts, window);
+    window.addEventListener("pagehide", (event) => {
+      // A page kept in the back/forward cache retains its active controller.
+      if (!event.persisted) cleanup();
+    });
+  }
+</script>

@@ -91,6 +91,46 @@ h1 {
   font-size: 13px;
   white-space: nowrap;
 }
+.feed-controls {
+  max-width: 808px;
+  margin-inline: auto;
+  padding: 0 24px 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+}
+.feed-controls label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.feed-controls input,
+.feed-controls select {
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+}
+.load-more {
+  display: block;
+  min-height: 44px;
+  margin: 24px auto 0;
+  padding: 8px 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--accent);
+}
+[data-feed-sentinel] {
+  height: 1px;
+}
 .feed-shell {
   max-width: calc(var(--feed-width) + 32px);
   padding: 24px 16px 0;
@@ -147,6 +187,9 @@ h2 a {
   overflow-x: auto;
   scroll-snap-type: x mandatory;
 }
+[data-carousel][data-enhanced] .media-track {
+  touch-action: pan-y pinch-zoom;
+}
 .media-slide {
   flex: 0 0 100%;
   min-width: 0;
@@ -181,6 +224,10 @@ h2 a {
   background: var(--surface);
   color: var(--accent);
 }
+.carousel-controls button[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
 .post-details {
   padding: 20px 24px;
 }
@@ -190,6 +237,12 @@ h2 a {
 .caption p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.caption p.is-collapsed {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
 }
 .text-button {
   padding: 8px 0;
@@ -217,6 +270,13 @@ h2 a {
   margin-top: 6px;
 }
 @media (max-width: 480px) {
+  .feed-controls {
+    padding: 0 16px 16px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .search-control {
+    grid-column: 1 / -1;
+  }
   .header-inner {
     padding: 16px;
   }

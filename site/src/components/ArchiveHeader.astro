@@ -13,4 +13,32 @@ const { title, count } = Astro.props;
     </div>
     <p class="collection-count">{count} saved posts</p>
   </div>
+  <form class="feed-controls" data-feed-controls role="search" hidden>
+    <label class="search-control">
+      <span>Search saved posts</span>
+      <input
+        type="search"
+        name="q"
+        data-feed-search
+        placeholder="Creator or caption"
+        disabled
+      />
+    </label>
+    <label>
+      <span>Media type</span>
+      <select name="type" data-feed-type disabled>
+        <option value="all">All media</option>
+        <option value="image">Images</option>
+        <option value="video">Videos</option>
+        <option value="carousel">Carousels</option>
+      </select>
+    </label>
+    <label>
+      <span>Sort by</span>
+      <select name="sort" data-feed-sort disabled>
+        <option value="archived">Recently saved</option>
+        <option value="published">Recently posted</option>
+      </select>
+    </label>
+  </form>
 </header>
