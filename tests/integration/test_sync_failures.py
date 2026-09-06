@@ -8,6 +8,7 @@ import pytest
 from sync.archive.models import Manifest
 from sync.archive.store import SnapshotStore
 from sync.instagram.errors import (
+    LoginError,
     SizeError,
     TransientExhaustionError,
     UnavailablePostError,
@@ -158,16 +159,87 @@ def test_snapshot_symlinks_are_rejected_without_following_them(tmp_path: Path) -
     assert (harness.snapshot / "secret-link").is_symlink()
 
 
-def test_disappearance_during_download_is_an_aggregate_discovery_skip(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", list(VerificationStatus))
+def test_unavailable_download_requires_source_verification(
+    tmp_path: Path, status: VerificationStatus
+) -> None:
     harness = SyncHarness(tmp_path)
     harness.client.saved = [public_image("DISAPPEARED")]
-    harness.client.download_failure = UnavailablePostError("post disappeared")
+    harness.client.download_failure = UnavailablePostError("media unavailable")
+    harness.client.statuses["DISAPPEARED"] = status
     report = harness.run()
-    assert report.unavailable_skip_count == 1
+    assert harness.client.verified == ["DISAPPEARED"]
     assert report.new_count == 0
-    assert "DISAPPEARED" not in repr(report)
+    if status is VerificationStatus.PUBLIC:
+        assert report.media_failure_shortcodes == ("DISAPPEARED",)
+        assert (report.private_skip_count, report.unavailable_skip_count) == (0, 0)
+    else:
+        assert "DISAPPEARED" not in repr(report)
+        assert (report.private_skip_count, report.unavailable_skip_count) == (
+            (1, 0) if status is VerificationStatus.PRIVATE else (0, 1)
+        )
     assert "DISAPPEARED" not in harness.snapshot_text()
     assert list((harness.snapshot / "media").iterdir()) == []
+
+
+@pytest.mark.parametrize("error", [TransientExhaustionError, LoginError])
+def test_unavailable_download_with_verification_failure_aborts(
+    tmp_path: Path, error: type[Exception]
+) -> None:
+    harness = SyncHarness(tmp_path)
+    harness.seed(2)
+    harness.removals.write_text("OLD000\n", encoding="utf-8")
+    harness.client.saved = [public_image("DISAPPEARED")]
+    harness.client.download_failure = UnavailablePostError("media unavailable")
+    harness.client.statuses["DISAPPEARED"] = error("verification failed")
+    before = harness.snapshot_bytes()
+    with pytest.raises(error):
+        harness.run()
+    assert harness.client.verified == ["DISAPPEARED"]
+    assert harness.snapshot_bytes() == before
+
+
+@pytest.mark.parametrize("existing_snapshot", [True, False])
+def test_install_rename_then_interrupt_restores_original_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing_snapshot: bool
+) -> None:
+    import shutil
+
+    harness = SyncHarness(tmp_path)
+    harness.seed(1)
+    before = harness.snapshot_bytes()
+    if not existing_snapshot:
+        shutil.rmtree(harness.snapshot)
+    harness.client.saved = [public_image("NEWPUBLIC")]
+    original = os.replace
+    interrupted = False
+
+    def rename_then_interrupt(source: str | Path, destination: str | Path) -> None:
+        nonlocal interrupted
+        original(source, destination)
+        if (
+            Path(destination) == harness.snapshot
+            and ".staging-" in Path(source).name
+            and not interrupted
+        ):
+            interrupted = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("sync.engine.os.replace", rename_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        harness.run()
+    assert interrupted
+    if existing_snapshot:
+        assert harness.snapshot_bytes() == before
+        harness.client.feed_failure = RuntimeError("abort after recovery")
+        with pytest.raises(RuntimeError):
+            harness.run()
+        assert harness.snapshot_bytes() == before
+    else:
+        assert not harness.snapshot.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == (
+        ["removals.txt", "snapshot"] if existing_snapshot else ["removals.txt"]
+    )
 
 
 @pytest.mark.parametrize("when", ["after_backup", "after_install"])

@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from sync.archive.budget import REJECT_BYTES, WARNING_BYTES
 from sync.instagram.errors import (
     AuthenticationError,
     PublicationError,
@@ -60,6 +61,8 @@ def render_job_summary(report: SyncReport | None, failure: BaseException | None 
                 f"Snapshot bytes: {report.snapshot_bytes}",
             )
         )
+        if WARNING_BYTES <= report.snapshot_bytes < REJECT_BYTES:
+            lines.append("Warning: snapshot size is approaching the publication budget.")
         if report.media_failure_shortcodes:
             safe_codes = [
                 code

@@ -60,3 +60,17 @@ def test_summary_supports_failure_before_report_exists() -> None:
     summary = render_job_summary(None, RuntimeError("private token"))
     assert "private token" not in summary
     assert "fail" in summary.lower()
+
+
+@pytest.mark.parametrize(
+    ("snapshot_bytes", "warns"),
+    [(849_999_999, False), (850_000_000, True), (899_999_999, True), (900_000_000, False)],
+)
+def test_summary_warns_at_snapshot_budget_boundary(snapshot_bytes: int, warns: bool) -> None:
+    from sync.reporting import SyncReport, render_job_summary
+
+    summary = render_job_summary(SyncReport(snapshot_bytes=snapshot_bytes))
+    assert ("warning" in summary.lower()) is warns
+    if warns:
+        assert "size" in summary.lower()
+        assert "budget" in summary.lower()

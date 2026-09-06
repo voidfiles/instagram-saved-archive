@@ -45,6 +45,7 @@ class SyncOptions:
         if not isinstance(self.full_scan, bool):
             raise ValidationError("full scan must be a boolean")
         object.__setattr__(self, "max_new_posts", max(1, min(50, self.max_new_posts)))
+        object.__setattr__(self, "reconcile_limit", min(20, self.reconcile_limit))
 
 
 class SyncEngine:
@@ -161,11 +162,10 @@ class SyncEngine:
             attempted += 1
             try:
                 archived = self._ingest(stage, post, now)
-            except UnavailablePostError:
-                report = replace(report, unavailable_skip_count=report.unavailable_skip_count + 1)
-            except ValidationError:
+            except (UnavailablePostError, ValidationError):
                 # The processor cleans all item output before raising. A fresh source check
-                # is required before retaining a public shortcode in a private job summary.
+                # is required: an unavailable media URL is not evidence that the post
+                # disappeared, and only a confirmed public shortcode may be reported.
                 status = self.client.verify(post.shortcode)
                 if status is VerificationStatus.PUBLIC:
                     report = replace(
@@ -309,16 +309,20 @@ def _recover_swap(snapshot: Path, backup: Path) -> None:
 
 def _install_snapshot(stage: Path, snapshot: Path, backup: Path) -> None:
     had_snapshot = snapshot.exists()
-    installed = False
     try:
         if had_snapshot:
             os.replace(snapshot, backup)
             _fsync_directory(snapshot.parent)
         os.replace(stage, snapshot)
-        installed = True
         _fsync_directory(snapshot.parent)
     except BaseException:
-        if installed:
+        # A rename can complete before raising (for example on KeyboardInterrupt).
+        # Infer installation from directory state, never a flag assigned after rename.
+        # Validate both recognized snapshots before moving either recovery name.
+        if backup.exists():
+            _validate_snapshot(backup)
+        if not stage.exists() and snapshot.exists():
+            _validate_snapshot(snapshot)
             os.replace(snapshot, stage)
         if backup.exists():
             os.replace(backup, snapshot)
@@ -328,6 +332,14 @@ def _install_snapshot(stage: Path, snapshot: Path, backup: Path) -> None:
     # any remaining backup is validated and collected on the next invocation.
     if had_snapshot:
         shutil.rmtree(backup, ignore_errors=True)
+
+
+def _validate_snapshot(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise ValidationError("snapshot must be a plain directory")
+    store = SnapshotStore(root)
+    manifest, _ = store.load()
+    store.validate_files(manifest)
 
 
 def _fsync_tree(root: Path) -> None:

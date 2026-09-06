@@ -34,6 +34,20 @@ def test_bounded_reconciliation_refreshes_only_selected_posts(tmp_path: Path) ->
     assert all(post.verified_at == BEFORE for post in posts[20:])
 
 
+@pytest.mark.parametrize("requested", [20, 21])
+def test_reconciliation_limit_never_exceeds_twenty(tmp_path: Path, requested: int) -> None:
+    from sync.engine import SyncOptions
+
+    harness = SyncHarness(tmp_path)
+    harness.seed(21)
+    harness.run(SyncOptions(reconcile_limit=requested))
+    manifest, state = SnapshotStore(harness.snapshot).load()
+    assert harness.client.verified == [f"OLD{i:03}" for i in range(20)]
+    assert sum(post.verified_at == NOW for post in manifest.posts) == 20
+    assert manifest.posts[20].verified_at == BEFORE
+    assert state.reconciliation_cursor == 20
+
+
 def test_fewer_than_twenty_posts_are_verified_once(tmp_path: Path) -> None:
     harness = SyncHarness(tmp_path)
     harness.seed(3, cursor=2)
