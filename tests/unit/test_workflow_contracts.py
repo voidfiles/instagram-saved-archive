@@ -370,7 +370,7 @@ def _assert_deployment_contract(workflow: Mapping[object, object]) -> None:
         "INSTAGRAM_USERNAME": "${{ vars.INSTAGRAM_USERNAME }}",
         "INSTAGRAM_SESSION_B64": "${{ secrets.INSTAGRAM_SESSION_B64 }}",
         "FULL_SCAN": "${{ inputs.full_scan == true }}",
-        "MAX_NEW_POSTS": "${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.max_new_posts) || '50' }}",
+        "MAX_NEW_POSTS": "${{ github.event_name == 'workflow_dispatch' && inputs.max_new_posts || '50' }}",
     }
     assert "working-directory" not in sync
     publish_lines = str(publish.get("run")).splitlines()
