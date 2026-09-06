@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import io
-from collections.abc import Iterator
+import pickle
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import ClassVar, Self
 
 import pytest
+from instaloader import Instaloader
 from instaloader.exceptions import (
     AbortDownloadException,
     ConnectionException,
@@ -17,6 +20,9 @@ from instaloader.exceptions import (
     QueryReturnedNotFoundException,
     TooManyRequestsException,
 )
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from urllib3.connectionpool import HTTPConnectionPool
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from sync.instagram.client import InstaloaderClient
 from sync.instagram.errors import (
@@ -26,7 +32,18 @@ from sync.instagram.errors import (
     ThrottleError,
     TransientTransportError,
 )
-from sync.instagram.models import MediaKind, SavedCandidate, VerificationStatus
+from sync.instagram.models import MediaKind, SavedCandidate, SourceMedia, VerificationStatus
+
+
+def _real_client(tmp_path: Path) -> tuple[InstaloaderClient, Instaloader]:
+    session_path = tmp_path / "real-session"
+    session_path.write_bytes(pickle.dumps({"csrftoken": "offline-csrf"}))
+    loader = Instaloader(max_connection_attempts=1)
+
+    def factory(**_options: int) -> Instaloader:
+        return loader
+
+    return InstaloaderClient(session_path, loader_factory=factory), loader
 
 
 class ChunkedRaw(io.BytesIO):
@@ -36,6 +53,19 @@ class ChunkedRaw(io.BytesIO):
         if size is None or size < 0:
             raise AssertionError("download attempted an unbounded body read")
         return super().read(min(size, 3))
+
+
+class FailingRaw(ChunkedRaw):
+    def __init__(self, error: Exception) -> None:
+        super().__init__(b"partial media bytes")
+        self.error = error
+        self.read_count = 0
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self.read_count += 1
+        if self.read_count > 1:
+            raise self.error
+        return super().read(size)
 
 
 class FakeResponse:
@@ -56,10 +86,37 @@ class FakeResponse:
         self.raw.close()
 
 
+class FailingResponse(FakeResponse):
+    def __init__(self, error: Exception) -> None:
+        super().__init__(b"")
+        self.raw = FailingRaw(error)
+
+
+class OfflineStatusResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.reason = "Too Many Requests"
+        self.url = "https://cdn.example/media.jpg?session=secret-value"
+
+    def json(self) -> dict[str, str]:
+        return {"status": "fail", "message": "body=secret-value"}
+
+
+class OfflineAnonymousSession:
+    def __init__(self, response: OfflineStatusResponse) -> None:
+        self.response = response
+
+    def get(self, _url: str, *, stream: bool) -> OfflineStatusResponse:
+        assert stream
+        return self.response
+
+
 class FakeContext:
-    def __init__(self) -> None:
+    def __init__(self, identity_name: str | None) -> None:
         self.responses: list[FakeResponse | Exception] = []
         self.requested_urls: list[str] = []
+        self.identity_name = identity_name
+        self.error_log: list[str] = []
 
     def get_raw(self, url: str) -> FakeResponse:
         self.requested_urls.append(url)
@@ -68,10 +125,18 @@ class FakeContext:
             raise result
         return result
 
+    def graphql_query(
+        self,
+        _query_hash: str,
+        _variables: dict[str, object],
+        _referer: str | None = None,
+    ) -> dict[str, object]:
+        return {"data": {"user": {"username": self.identity_name}}}
+
 
 class FakeLoader:
     def __init__(self, login_name: str | None = "archive_owner") -> None:
-        self.context = FakeContext()
+        self.context = FakeContext(login_name)
         self.login_name = login_name
         self.load_calls: list[tuple[str, str]] = []
         self.load_error: Exception | None = None
@@ -245,6 +310,84 @@ def test_validate_identity_loads_the_requested_session_and_requires_an_exact_mat
     assert loader.load_calls == [("archive_owner", str(session_path))]
 
 
+def test_real_context_logging_is_suppressed_before_identity_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Break caught: upstream URL/body/session diagnostics bypass sanitized boundary errors."""
+    client, loader = _real_client(tmp_path)
+
+    def identity_probe(
+        _query_hash: str,
+        _variables: dict[str, object],
+        _referer: str | None = None,
+    ) -> dict[str, object]:
+        assert _query_hash == "d6f4427fbe92d846298cf93df0b937d3"
+        assert _variables == {}
+        assert _referer is None
+        loader.context.log("https://instagram.example/?session=secret-value")  # type: ignore[no-untyped-call]
+        loader.context.error("response body cookie=secret-value")  # type: ignore[no-untyped-call]
+        return {"data": {"user": {"username": "archive_owner"}}}
+
+    monkeypatch.setattr(loader.context, "graphql_query", identity_probe)
+
+    client.validate_identity("archive_owner")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert loader.context.error_log == []
+
+
+@pytest.mark.parametrize(
+    ("upstream", "expected_type"),
+    [
+        pytest.param(
+            AbortDownloadException("challenge_required cookie=secret-value"),
+            ChallengeError,
+            id="challenge",
+        ),
+        pytest.param(
+            TooManyRequestsException("429 body=secret-value"),
+            ThrottleError,
+            id="throttle",
+        ),
+        pytest.param(
+            ConnectionException("url=https://secret.example/"),
+            TransientTransportError,
+            id="transient",
+        ),
+    ],
+)
+def test_real_identity_probe_preserves_failure_category(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: Exception,
+    expected_type: type[Exception],
+) -> None:
+    """Break caught: test_login converts a classified identity failure into mismatch login."""
+    client, loader = _real_client(tmp_path)
+
+    def fail_identity_probe(
+        _query_hash: str,
+        _variables: dict[str, object],
+        _referer: str | None = None,
+    ) -> None:
+        assert _query_hash == "d6f4427fbe92d846298cf93df0b937d3"
+        assert _variables == {}
+        assert _referer is None
+        raise upstream
+
+    monkeypatch.setattr(loader.context, "graphql_query", fail_identity_probe)
+
+    with pytest.raises(expected_type) as captured:
+        client.validate_identity("archive_owner")
+
+    assert "secret" not in str(captured.value)
+    assert captured.value.__cause__ is None
+
+
 def test_iter_saved_is_lazy_and_candidates_do_not_print_their_token(tmp_path: Path) -> None:
     """Break caught: feed access becomes eager or a private candidate token appears in repr output."""
     loader = FakeLoader()
@@ -363,6 +506,76 @@ def test_download_streams_into_an_exclusively_created_destination(tmp_path: Path
     assert response.closed
     with pytest.raises(FileExistsError):
         client.download(public.media[0], destination)
+
+
+def test_real_context_media_429_is_terminal_and_sanitized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: get_raw's plain 429 ConnectionException is treated as retryable."""
+    client, loader = _real_client(tmp_path)
+    response = OfflineStatusResponse(429)
+
+    @contextmanager
+    def anonymous_session() -> Iterator[OfflineAnonymousSession]:
+        yield OfflineAnonymousSession(response)
+
+    monkeypatch.setattr(loader.context, "get_anonymous_session", anonymous_session)
+    destination = tmp_path / "partial-media"
+
+    with pytest.raises(ThrottleError, match="Instagram throttled") as captured:
+        client.download(
+            SourceMedia(0, MediaKind.IMAGE, "https://cdn.example/media.jpg"),
+            destination,
+        )
+
+    assert "secret" not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        pytest.param(
+            lambda: RequestsConnectionError("url=https://secret.example/"),
+            id="requests-connection",
+        ),
+        pytest.param(
+            lambda: ProtocolError("url=https://secret.example/"),
+            id="urllib3-protocol",
+        ),
+        pytest.param(
+            lambda: ReadTimeoutError(
+                HTTPConnectionPool("offline.invalid"),
+                "https://secret.example/",
+                "body=secret-value",
+            ),
+            id="urllib3-read-timeout",
+        ),
+    ],
+)
+def test_stream_failure_is_transient_sanitized_and_removes_partial_file(
+    tmp_path: Path,
+    error_factory: Callable[[], Exception],
+) -> None:
+    """Break caught: raw-read transport failure escapes and leaves an unretryable partial file."""
+    loader = FakeLoader()
+    response = FailingResponse(error_factory())
+    loader.context.responses.append(response)
+    client = _client(loader, tmp_path / "session")
+    destination = tmp_path / "partial-media"
+
+    with pytest.raises(TransientTransportError) as captured:
+        client.download(
+            SourceMedia(0, MediaKind.VIDEO, "https://cdn.example/video.mp4"),
+            destination,
+        )
+
+    assert str(captured.value) == "Instagram transport failed"
+    assert captured.value.__cause__ is None
+    assert not destination.exists()
+    assert response.closed
 
 
 @pytest.mark.parametrize(

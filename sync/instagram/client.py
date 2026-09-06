@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -11,6 +11,8 @@ from typing import BinaryIO, NoReturn, Protocol, Self, cast
 
 from instaloader import Instaloader, Post, Profile
 from instaloader import exceptions as instaloader_errors
+from requests.exceptions import RequestException
+from urllib3.exceptions import HTTPError
 
 from .errors import (
     ArchiveError,
@@ -23,6 +25,7 @@ from .errors import (
 from .models import MediaKind, PublicPost, SavedCandidate, SourceMedia, VerificationStatus
 
 _COPY_BLOCK_SIZE = 1024 * 1024
+_IDENTITY_QUERY_HASH = "d6f4427fbe92d846298cf93df0b937d3"
 
 
 class _RawResponse(Protocol):
@@ -41,17 +44,28 @@ class _RawResponse(Protocol):
 class _Context(Protocol):
     def get_raw(self, url: str) -> _RawResponse: ...
 
+    def graphql_query(
+        self,
+        query_hash: str,
+        variables: dict[str, object],
+        referer: str | None = None,
+    ) -> dict[str, object]: ...
+
 
 class _Loader(Protocol):
     context: _Context
 
     def load_session_from_file(self, username: str, filename: str) -> None: ...
 
-    def test_login(self) -> str | None: ...
-
 
 class _LoaderFactory(Protocol):
     def __call__(self, *, max_connection_attempts: int) -> _Loader: ...
+
+
+class _LoggingContext(Protocol):
+    log: Callable[..., None]
+    error: Callable[..., None]
+    error_log: list[str]
 
 
 class _OwnerProfile(Protocol):
@@ -103,6 +117,7 @@ class InstaloaderClient:
     ) -> None:
         factory = cast(_LoaderFactory, loader_factory)
         self._loader = factory(max_connection_attempts=1)
+        _suppress_context_logging(self._loader.context)
         self._session_path = session_path
         self._profile_type = cast(_ProfileType, profile_type)
         self._post_type = cast(_PostType, post_type)
@@ -111,7 +126,7 @@ class InstaloaderClient:
     def validate_identity(self, username: str) -> None:
         try:
             self._loader.load_session_from_file(username, str(self._session_path))
-            authenticated_username = self._loader.test_login()
+            authenticated_username = _identity_username(self._loader.context)
         except _TRANSLATABLE_ERRORS as error:
             _raise_translated(error)
         if authenticated_username != username:
@@ -158,21 +173,22 @@ class InstaloaderClient:
 
     def download(self, source: SourceMedia, destination: Path) -> None:
         created = False
+        completed = False
         try:
             with destination.open("xb") as output:
                 created = True
                 with self._loader.context.get_raw(source.url) as response:
                     shutil.copyfileobj(response.raw, output, length=_COPY_BLOCK_SIZE)
+            completed = True
         except FileExistsError:
             raise
-        except OSError:
-            if created:
-                destination.unlink(missing_ok=True)
-            raise
         except _TRANSLATABLE_ERRORS as error:
-            if created:
-                destination.unlink(missing_ok=True)
             _raise_translated(error)
+        except OSError:
+            raise
+        finally:
+            if created and not completed:
+                destination.unlink(missing_ok=True)
 
     def verify(self, shortcode: str) -> VerificationStatus:
         try:
@@ -220,11 +236,34 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _identity_username(context: _Context) -> str | None:
+    response = context.graphql_query(_IDENTITY_QUERY_HASH, {})
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return None
+    user = data.get("user")
+    if not isinstance(user, dict):
+        return None
+    username = user.get("username")
+    return username if isinstance(username, str) else None
+
+
 def _raise_translated(error: Exception) -> NoReturn:
     translated = translate_instaloader_error(error)
     if translated is None:
         raise error
     raise translated from None
+
+
+def _suppress_context_logging(context: object) -> None:
+    logging_context = cast(_LoggingContext, context)
+    logging_context.log = _discard_log
+    logging_context.error = _discard_log
+    logging_context.error_log.clear()
+
+
+def _discard_log(*_message: object, **_options: object) -> None:
+    pass
 
 
 _TRANSLATABLE_ERRORS = (
@@ -233,4 +272,6 @@ _TRANSLATABLE_ERRORS = (
     ArchiveError,
     TransientTransportError,
     UnavailablePostError,
+    RequestException,
+    HTTPError,
 )

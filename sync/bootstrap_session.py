@@ -22,10 +22,14 @@ class _BootstrapLoader(Protocol):
     def save_session_to_file(self, filename: str) -> None: ...
 
 
+class _BootstrapLoaderFactory(Protocol):
+    def __call__(self, *, max_connection_attempts: int) -> _BootstrapLoader: ...
+
+
 def bootstrap_session(username: str, loader_factory: object = Instaloader) -> str:
     """Authenticate interactively and return the serialized session as base64 text."""
-    factory = cast("type[_BootstrapLoader]", loader_factory)
-    loader = factory()
+    factory = cast(_BootstrapLoaderFactory, loader_factory)
+    loader = factory(max_connection_attempts=1)
     try:
         loader.interactive_login(username)
         authenticated_username = loader.test_login()

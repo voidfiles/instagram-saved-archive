@@ -52,18 +52,33 @@ def test_bootstrap_runs_interactive_and_two_factor_flow_then_returns_base64() ->
     """Break caught: bootstrap bypasses Instaloader's interactive/2FA flow or returns raw bytes."""
     loader = FakeBootstrapLoader()
 
-    encoded = bootstrap_session("archive_owner", loader_factory=lambda: loader)
+    encoded = bootstrap_session("archive_owner", loader_factory=lambda **_options: loader)
 
     assert loader.interactive_calls == ["archive_owner"]
     assert loader.two_factor_codes == ["246810"]
     assert base64.b64decode(encoded, validate=True) == b"serialized\x00session"
 
 
+def test_bootstrap_disables_instaloaders_internal_retries() -> None:
+    """Break caught: interactive authentication retries a terminal failure inside Instaloader."""
+    loader = FakeBootstrapLoader()
+    factory_options: list[dict[str, int]] = []
+
+    def factory(**options: int) -> FakeBootstrapLoader:
+        factory_options.append(options)
+        return loader
+
+    encoded = bootstrap_session("archive_owner", loader_factory=factory)
+
+    assert base64.b64decode(encoded, validate=True) == b"serialized\x00session"
+    assert factory_options == [{"max_connection_attempts": 1}]
+
+
 def test_bootstrap_uses_mode_0600_storage_and_deletes_it_after_encoding() -> None:
     """Break caught: the serialized credential is world-readable or survives successful encoding."""
     loader = FakeBootstrapLoader()
 
-    bootstrap_session("archive_owner", loader_factory=lambda: loader)
+    bootstrap_session("archive_owner", loader_factory=lambda **_options: loader)
 
     assert loader.saved_path is not None
     assert loader.mode_during_save == 0o600
@@ -75,7 +90,7 @@ def test_bootstrap_rejects_an_identity_mismatch_without_writing_a_session() -> N
     loader = FakeBootstrapLoader(login_name="different_owner")
 
     with pytest.raises(LoginError, match="authenticated identity does not match"):
-        bootstrap_session("archive_owner", loader_factory=lambda: loader)
+        bootstrap_session("archive_owner", loader_factory=lambda **_options: loader)
 
     assert loader.saved_path is None
 
@@ -92,7 +107,7 @@ def test_bootstrap_deletes_temporary_storage_when_encoding_fails(
     monkeypatch.setattr("sync.bootstrap_session.base64.b64encode", fail_encode)
 
     with pytest.raises(RuntimeError, match="injected encoding failure"):
-        bootstrap_session("archive_owner", loader_factory=lambda: loader)
+        bootstrap_session("archive_owner", loader_factory=lambda **_options: loader)
 
     assert loader.saved_path is not None
     assert not loader.saved_path.exists()
@@ -103,7 +118,7 @@ def test_bootstrap_translates_login_failures_without_leaking_credentials() -> No
     loader = FakeBootstrapLoader(login_error=BadCredentialsException("password=secret"))
 
     with pytest.raises(LoginError) as captured:
-        bootstrap_session("archive_owner", loader_factory=lambda: loader)
+        bootstrap_session("archive_owner", loader_factory=lambda **_options: loader)
 
     assert str(captured.value) == "Instagram login failed"
     assert captured.value.__cause__ is None
@@ -115,7 +130,7 @@ def test_bootstrap_does_not_change_the_process_umask() -> None:
     previous = os.umask(0)
     os.umask(previous)
 
-    bootstrap_session("archive_owner", loader_factory=lambda: loader)
+    bootstrap_session("archive_owner", loader_factory=lambda **_options: loader)
 
     observed = os.umask(0)
     os.umask(observed)

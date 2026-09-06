@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import ClassVar
 
 from instaloader import exceptions as instaloader_errors
+from requests.exceptions import RequestException
+from urllib3.exceptions import HTTPError
 
 
 class ArchiveError(Exception):
@@ -69,7 +71,10 @@ def translate_instaloader_error(error: Exception) -> Exception | None:
     ):
         return error
     chain = _exception_chain(error)
-    if any(isinstance(item, instaloader_errors.TooManyRequestsException) for item in chain):
+    if any(isinstance(item, instaloader_errors.TooManyRequestsException) for item in chain) or any(
+        isinstance(item, instaloader_errors.ConnectionException) and str(item).startswith("429 ")
+        for item in chain
+    ):
         return ThrottleError("Instagram throttled")
     if any(
         isinstance(
@@ -105,6 +110,8 @@ def translate_instaloader_error(error: Exception) -> Exception | None:
     if isinstance(error, instaloader_errors.InvalidArgumentException):
         return ValidationError("Instagram operation is invalid")
     if isinstance(error, instaloader_errors.InstaloaderException):
+        return TransientTransportError("Instagram transport failed")
+    if isinstance(error, (RequestException, HTTPError)):
         return TransientTransportError("Instagram transport failed")
     return None
 
