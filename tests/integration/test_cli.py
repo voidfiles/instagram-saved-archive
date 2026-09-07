@@ -114,6 +114,61 @@ def test_budget_rejection_reports_largest_files(tmp_path: Path) -> None:
     assert report["budget"]["largest"][0]["path"] == "too-large.mp4"
 
 
+def test_build_site_and_validate_site_emit_stable_machine_readable_results(tmp_path: Path) -> None:
+    """Break caught: static-site commands do not install or validate a public artifact."""
+    archive = tmp_path / "archive"
+    destination = tmp_path / "public-site"
+    SnapshotStore(archive).initialize()
+
+    built = cli("build-site", "--archive", str(archive), "--destination", str(destination))
+
+    assert built.returncode == 0, built.stderr
+    build_report = json.loads(built.stdout)
+    assert build_report == {
+        "budget": build_report["budget"],
+        "command": "build-site",
+        "exit_code": 0,
+        "status": "ok",
+    }
+    assert build_report["budget"]["level"] == "ok"
+    assert (destination / "index.html").is_file()
+
+    validated = cli("validate-site", "--root", str(destination))
+
+    assert validated.returncode == 0, validated.stderr
+    validate_report = json.loads(validated.stdout)
+    assert validate_report == {
+        "budget": validate_report["budget"],
+        "command": "validate-site",
+        "exit_code": 0,
+        "status": "ok",
+    }
+    assert validate_report["budget"]["level"] == "ok"
+
+
+@pytest.mark.parametrize("kind", ["malformed-archive", "scripted-artifact"])
+def test_site_commands_sanitize_invalid_content(tmp_path: Path, kind: str) -> None:
+    """Break caught: malformed public input leaks source content or an exception traceback."""
+    secret = "synthetic-sensitive-source-content"
+    archive = tmp_path / "archive"
+    destination = tmp_path / "public-site"
+    if kind == "malformed-archive":
+        archive.mkdir()
+        (archive / "manifest.json").write_text(secret, encoding="utf-8")
+        result = cli("build-site", "--archive", str(archive), "--destination", str(destination))
+    else:
+        SnapshotStore(archive).initialize()
+        built = cli("build-site", "--archive", str(archive), "--destination", str(destination))
+        assert built.returncode == 0, built.stderr
+        (destination / "index.html").write_text(f"<script>{secret}</script>", encoding="utf-8")
+        result = cli("validate-site", "--root", str(destination))
+
+    assert result.returncode == 30
+    assert json.loads(result.stdout) == {"exit_code": 30, "status": "error"}
+    assert secret not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_sync_composes_identity_client_engine_and_json_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

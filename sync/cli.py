@@ -22,6 +22,7 @@ from sync.instagram.client import InstaloaderClient
 from sync.instagram.errors import ArchiveError, AuthenticationError, SizeError, ValidationError
 from sync.instagram.retry import RetryPolicy, retry_transport
 from sync.reporting import render_job_summary
+from sync.site import build_site, validate_site_output
 from sync.site_input.exporter import export_site_input, resolve_plain_path, validate_snapshot
 
 
@@ -78,6 +79,12 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--full-scan", action="store_true")
     budget = commands.add_parser("check-budget", allow_abbrev=False)
     budget.add_argument("--root", type=Path, required=True)
+    build = commands.add_parser("build-site", allow_abbrev=False)
+    build.add_argument("--archive", type=Path, required=True)
+    build.add_argument("--destination", type=Path, required=True)
+    build.add_argument("--title", default="Saved")
+    validate = commands.add_parser("validate-site", allow_abbrev=False)
+    validate.add_argument("--root", type=Path, required=True)
     return parser
 
 
@@ -100,6 +107,24 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
         if not root.is_dir():
             raise ValidationError("budget root must be a directory")
         budget = check_budget(root)
+        result["budget"] = _budget_json(budget)
+        if budget.level == "reject":
+            result["status"] = "error"
+            code = 31
+            diagnostic = "Publication size budget exceeded.\n"
+        elif budget.level == "warning":
+            diagnostic = "Warning: archive is approaching the publication size budget.\n"
+    elif args.command == "build-site":
+        budget = build_site(args.archive, args.destination, title=args.title)
+        result["budget"] = _budget_json(budget)
+        if budget.level == "reject":
+            result["status"] = "error"
+            code = 31
+            diagnostic = "Publication size budget exceeded.\n"
+        elif budget.level == "warning":
+            diagnostic = "Warning: archive is approaching the publication size budget.\n"
+    elif args.command == "validate-site":
+        budget = validate_site_output(args.root)
         result["budget"] = _budget_json(budget)
         if budget.level == "reject":
             result["status"] = "error"
